@@ -108,6 +108,32 @@ as a single checkpoint commit.  They should be split by subsystem, reviewed
 against native behaviour, and expanded with focused tests before any upstream
 submission.
 
+### Known review findings
+
+A post-checkpoint source review identified concrete limitations that should remain
+visible when this branch is used:
+
+- The list-backed generic AVL table does not provide comparison-ordered
+  enumeration, and restart-key handling can restart enumeration after exhaustion.
+- `NtQueryDirectoryFileEx` only approximates some query flags;
+  `SL_NO_CURSOR_UPDATE_QUERY` and `SL_INDEX_SPECIFIED` do not have native
+  semantics.
+- Several newly exported APIs lack complete public header declarations, and
+  `IPackageManager6` is hand-declared instead of generated from IDL.
+- SPPC authentication capture is process-global rather than context-specific,
+  replacement challenges can retain prior authentication state, and several
+  license/SLID results deliberately assume the targeted Word Grace installation.
+- The SPPC `ActivePlugins` test and implementation currently disagree on plugin
+  ordering and need native revalidation.
+- The XML regular-expression `\\u` parser still accepts an isolated low surrogate.
+- ProtectionPolicyManager `QueryInterface` needs normal COM `AddRef` ownership,
+  and its successful event/policy stubs are not general implementations.
+- The five-byte detour diagnostic reads the supplied address before the underlying
+  API validates it and therefore must not remain in a production build.
+
+These findings do not invalidate the recorded Office startup causality, but they
+do mean the checkpoint must not be treated as generally correct Wine behaviour.
+
 ## Temporary diagnostics intentionally retained
 
 This checkpoint intentionally retains diagnostics used to establish causality:
