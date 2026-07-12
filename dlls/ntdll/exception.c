@@ -241,6 +241,23 @@ NTSTATUS WINAPI dispatch_exception( EXCEPTION_RECORD *rec, CONTEXT *context )
     NTSTATUS status;
     DWORD i;
 
+    if (rec->ExceptionCode == EXCEPTION_WINE_CXX_EXCEPTION)
+    {
+        void *frames[32], *module;
+        USHORT count = RtlCaptureStackBackTrace( 0, ARRAY_SIZE(frames), frames, NULL );
+
+        WARN( "OFFICE_CXX exception object %p throw_info %p image %p frames %u\n",
+              rec->NumberParameters > 1 ? (void *)rec->ExceptionInformation[1] : NULL,
+              rec->NumberParameters > 2 ? (void *)rec->ExceptionInformation[2] : NULL,
+              rec->NumberParameters > 3 ? (void *)rec->ExceptionInformation[3] : NULL, count );
+        for (i = 0; i < count; i++)
+        {
+            RtlPcToFileHeader( frames[i], &module );
+            WARN( "OFFICE_CXX frame %lu %p module %p offset %Ix\n", i, frames[i], module,
+                  module ? (ULONG_PTR)frames[i] - (ULONG_PTR)module : 0 );
+        }
+    }
+
     switch (rec->ExceptionCode)
     {
     case EXCEPTION_WINE_STUB:

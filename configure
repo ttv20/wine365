@@ -22890,6 +22890,7 @@ wine_fn_config_makefile dlls/sound.drv16 enable_win16
 wine_fn_config_makefile dlls/spoolss enable_spoolss
 wine_fn_config_makefile dlls/spoolss/tests enable_tests
 wine_fn_config_makefile dlls/sppc enable_sppc
+wine_fn_config_makefile dlls/sppc/tests enable_tests
 wine_fn_config_makefile dlls/srclient enable_srclient
 wine_fn_config_makefile dlls/srvcli enable_srvcli
 wine_fn_config_makefile dlls/srvsvc enable_srvsvc
@@ -24861,5 +24862,4 @@ IFS="$ac_save_IFS"
 printf '%s\n' "
 $as_me: Finished.  Do '${MAKE-make}' to compile Wine.
 " >&6
-
 

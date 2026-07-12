@@ -2877,6 +2877,23 @@ static BOOL crypt_export_simple(CRYPTKEY *pCryptKey, CRYPTKEY *pPubKey,
         }
 
         encrypt_block_impl(pPubKey->aiAlgid, &pPubKey->context, (BYTE *)(pAlgid + 1), (BYTE *)(pAlgid + 1));
+
+        /* Office builds an SPP authentication challenge by exporting an AES-256
+         * session key with an embedded RSA public key (SIMPLEBLOB).  Capture the
+         * plaintext session key so sppc can produce a verified HMAC result
+         * without needing the protected SPP private key. */
+        if (pCryptKey->aiAlgid == CALG_AES_256 && pCryptKey->dwKeyLen == 32 &&
+            pPubKey->aiAlgid == CALG_RSA_KEYX && pPubKey->dwKeyLen == 256)
+        {
+            HMODULE sppc = GetModuleHandleW(L"sppc.dll");
+            if (sppc)
+            {
+                void (CDECL *set_key)(const BYTE *, DWORD) =
+                    (void *)GetProcAddress(sppc, "__wine_sppc_set_auth_session_key");
+                if (set_key)
+                    set_key(pCryptKey->abKeyValue, pCryptKey->dwKeyLen);
+            }
+        }
     }
     *pdwDataLen = dwDataLen;
     return TRUE;
@@ -3756,6 +3773,24 @@ BOOL WINAPI RSAENH_CPGetHashParam(HCRYPTPROV hProv, HCRYPTHASH hHash, DWORD dwPa
             if (!pbData)
             {
                 *pdwDataLen = pCryptHash->dwHashSize;
+                return TRUE;
+            }
+
+            /* Office authenticates SPP policy queries by computing HMAC-SHA1 with
+             * the session key, then comparing SLGetAuthenticationResult to that
+             * value.  Capture the finalized HMAC so sppc can return a matching
+             * envelope without re-deriving the message layout. */
+            if (pCryptHash->aiAlgid == CALG_HMAC && pCryptHash->dwHashSize == 20 &&
+                copy_param(pbData, pdwDataLen, pCryptHash->abHashValue, pCryptHash->dwHashSize))
+            {
+                HMODULE sppc = GetModuleHandleW(L"sppc.dll");
+                if (sppc)
+                {
+                    void (CDECL *set_hmac)(const BYTE *, DWORD) =
+                        (void *)GetProcAddress(sppc, "__wine_sppc_set_expected_hmac");
+                    if (set_hmac)
+                        set_hmac(pCryptHash->abHashValue, pCryptHash->dwHashSize);
+                }
                 return TRUE;
             }
 

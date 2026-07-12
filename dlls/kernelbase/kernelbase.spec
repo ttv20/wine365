@@ -368,6 +368,7 @@
 @ stdcall FindFirstFileExA(str long ptr long ptr long)
 @ stdcall FindFirstFileExW(wstr long ptr long ptr long)
 @ stdcall FindFirstFileNameW(wstr long ptr ptr)
+@ stdcall FindNextFileNameW(ptr ptr ptr)
 @ stdcall FindFirstFileW(wstr ptr)
 @ stdcall FindFirstFreeAce(ptr ptr)
 @ stdcall FindFirstStreamW(wstr long ptr long)
@@ -376,11 +377,10 @@
 @ stdcall FindNLSStringEx(wstr long wstr long wstr long ptr ptr ptr long)
 @ stdcall FindNextChangeNotification(long)
 @ stdcall FindNextFileA(long ptr)
-# @ stub FindNextFileNameW
 @ stdcall FindNextFileW(long ptr)
 @ stdcall FindNextStreamW(long ptr)
 @ stdcall FindNextVolumeW(long ptr long)
-# @ stub FindPackagesByPackageFamily
+@ stdcall FindPackagesByPackageFamily(wstr long ptr ptr ptr ptr ptr)
 @ stdcall FindResourceExW(long wstr wstr long)
 @ stdcall FindResourceW(long wstr wstr)
 @ stdcall FindStringOrdinal(long wstr long wstr long long)
@@ -1483,6 +1483,7 @@
 @ stdcall SetFileApisToOEM()
 @ stdcall SetFileAttributesA(str long)
 @ stdcall SetFileAttributesW(wstr long)
+@ stdcall SetFileShortNameW(long wstr)
 @ stdcall SetFileInformationByHandle(long long ptr long)
 # @ stub SetFileIoOverlappedRange
 @ stdcall SetFilePointer(long long ptr long)

@@ -11,7 +11,7 @@
 @ stub __BuildCatchObject
 @ stub __BuildCatchObjectHelper
 @ stdcall -arch=!i386 __C_specific_handler(ptr long ptr ptr) ucrtbase.__C_specific_handler
-@ stub __C_specific_handler_noexcept
+@ stdcall -arch=!i386 __C_specific_handler_noexcept(ptr long ptr ptr) ucrtbase.__C_specific_handler
 @ cdecl __CxxDetectRethrow(ptr) ucrtbase.__CxxDetectRethrow
 @ cdecl __CxxExceptionFilter(ptr ptr long ptr) ucrtbase.__CxxExceptionFilter
 @ cdecl -norelay __CxxFrameHandler(ptr ptr ptr ptr) ucrtbase.__CxxFrameHandler

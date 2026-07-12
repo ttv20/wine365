@@ -22,10 +22,36 @@
 
 WINE_DEFAULT_DEBUG_CHANNEL(appx);
 
+typedef struct IPackageManager6 IPackageManager6;
+typedef struct IPackageManager6Vtbl
+{
+    HRESULT (WINAPI *QueryInterface)(IPackageManager6 *, REFIID, void **);
+    ULONG (WINAPI *AddRef)(IPackageManager6 *);
+    ULONG (WINAPI *Release)(IPackageManager6 *);
+    HRESULT (WINAPI *GetIids)(IPackageManager6 *, ULONG *, IID **);
+    HRESULT (WINAPI *GetRuntimeClassName)(IPackageManager6 *, HSTRING *);
+    HRESULT (WINAPI *GetTrustLevel)(IPackageManager6 *, TrustLevel *);
+    HRESULT (WINAPI *ProvisionPackageForAllUsersAsync)(IPackageManager6 *, HSTRING, void **);
+    HRESULT (WINAPI *AddPackageByAppInstallerFileAsync)(IPackageManager6 *, void *, UINT, void *, void **);
+    HRESULT (WINAPI *RequestAddPackageByAppInstallerFileAsync)(IPackageManager6 *, void *, UINT, void *, void **);
+    HRESULT (WINAPI *AddPackageToVolumeAndRelatedSetAsync)(IPackageManager6 *, void *, void *, UINT, void *, void *, void *, void *, void **);
+    HRESULT (WINAPI *StagePackageToVolumeAndRelatedSetAsync)(IPackageManager6 *, void *, void *, UINT, void *, void *, void *, void *, void **);
+    HRESULT (WINAPI *RequestAddPackageAsync)(IPackageManager6 *, void *, void *, UINT, void *, void *, void *, void **);
+} IPackageManager6Vtbl;
+
+struct IPackageManager6
+{
+    const IPackageManager6Vtbl *lpVtbl;
+};
+
+static const GUID package_manager6_iid =
+    {0x0847e909, 0x53cd, 0x4e4f, {0x83, 0x2e, 0x57, 0xd1, 0x80, 0xf6, 0xe4, 0x47}};
+
 struct package_manager
 {
     IPackageManager IPackageManager_iface;
     IPackageManager2 IPackageManager2_iface;
+    IPackageManager6 IPackageManager6_iface;
     LONG ref;
 };
 
@@ -53,6 +79,13 @@ static HRESULT WINAPI package_manager_QueryInterface( IPackageManager *iface, RE
     if (IsEqualGUID( iid, &IID_IPackageManager2 ))
     {
         *out = &impl->IPackageManager2_iface;
+        IInspectable_AddRef( *out );
+        return S_OK;
+    }
+
+    if (IsEqualGUID( iid, &package_manager6_iid ))
+    {
+        *out = &impl->IPackageManager6_iface;
         IInspectable_AddRef( *out );
         return S_OK;
     }
@@ -327,6 +360,96 @@ static const struct IPackageManager2Vtbl package_manager2_vtbl =
     package_manager2_StageUserDataAsync,
 };
 
+static inline struct package_manager *impl_from_IPackageManager6( IPackageManager6 *iface )
+{
+    return CONTAINING_RECORD( iface, struct package_manager, IPackageManager6_iface );
+}
+
+static HRESULT WINAPI package_manager6_QueryInterface( IPackageManager6 *iface, REFIID iid, void **out )
+{
+    struct package_manager *impl = impl_from_IPackageManager6( iface );
+    return package_manager_QueryInterface( &impl->IPackageManager_iface, iid, out );
+}
+
+static ULONG WINAPI package_manager6_AddRef( IPackageManager6 *iface )
+{
+    struct package_manager *impl = impl_from_IPackageManager6( iface );
+    return package_manager_AddRef( &impl->IPackageManager_iface );
+}
+
+static ULONG WINAPI package_manager6_Release( IPackageManager6 *iface )
+{
+    struct package_manager *impl = impl_from_IPackageManager6( iface );
+    return package_manager_Release( &impl->IPackageManager_iface );
+}
+
+static HRESULT WINAPI package_manager6_GetIids( IPackageManager6 *iface, ULONG *count, IID **iids )
+{
+    struct package_manager *impl = impl_from_IPackageManager6( iface );
+    return package_manager_GetIids( &impl->IPackageManager_iface, count, iids );
+}
+
+static HRESULT WINAPI package_manager6_GetRuntimeClassName( IPackageManager6 *iface, HSTRING *name )
+{
+    struct package_manager *impl = impl_from_IPackageManager6( iface );
+    return package_manager_GetRuntimeClassName( &impl->IPackageManager_iface, name );
+}
+
+static HRESULT WINAPI package_manager6_GetTrustLevel( IPackageManager6 *iface, TrustLevel *level )
+{
+    struct package_manager *impl = impl_from_IPackageManager6( iface );
+    return package_manager_GetTrustLevel( &impl->IPackageManager_iface, level );
+}
+
+static HRESULT WINAPI package_manager6_ProvisionPackageForAllUsersAsync( IPackageManager6 *iface,
+        HSTRING family_name, void **operation )
+{
+    FIXME( "iface %p, family_name %s, operation %p stub!\n", iface,
+            debugstr_hstring(family_name), operation );
+    if (operation) *operation = NULL;
+    return E_NOTIMPL;
+}
+
+#define PACKAGE_MANAGER6_STUB(name, args) \
+    static HRESULT WINAPI package_manager6_##name args \
+    { \
+        FIXME( "iface %p stub!\n", iface ); \
+        if (operation) *operation = NULL; \
+        return E_NOTIMPL; \
+    }
+
+PACKAGE_MANAGER6_STUB(AddPackageByAppInstallerFileAsync,
+        (IPackageManager6 *iface, void *uri, UINT options, void *volume, void **operation))
+PACKAGE_MANAGER6_STUB(RequestAddPackageByAppInstallerFileAsync,
+        (IPackageManager6 *iface, void *uri, UINT options, void *volume, void **operation))
+PACKAGE_MANAGER6_STUB(AddPackageToVolumeAndRelatedSetAsync,
+        (IPackageManager6 *iface, void *uri, void *dependencies, UINT options, void *volume,
+         void *families, void *packages, void *related, void **operation))
+PACKAGE_MANAGER6_STUB(StagePackageToVolumeAndRelatedSetAsync,
+        (IPackageManager6 *iface, void *uri, void *dependencies, UINT options, void *volume,
+         void *families, void *packages, void *related, void **operation))
+PACKAGE_MANAGER6_STUB(RequestAddPackageAsync,
+        (IPackageManager6 *iface, void *uri, void *dependencies, UINT options, void *volume,
+         void *families, void *related, void **operation))
+
+#undef PACKAGE_MANAGER6_STUB
+
+static const IPackageManager6Vtbl package_manager6_vtbl =
+{
+    package_manager6_QueryInterface,
+    package_manager6_AddRef,
+    package_manager6_Release,
+    package_manager6_GetIids,
+    package_manager6_GetRuntimeClassName,
+    package_manager6_GetTrustLevel,
+    package_manager6_ProvisionPackageForAllUsersAsync,
+    package_manager6_AddPackageByAppInstallerFileAsync,
+    package_manager6_RequestAddPackageByAppInstallerFileAsync,
+    package_manager6_AddPackageToVolumeAndRelatedSetAsync,
+    package_manager6_StagePackageToVolumeAndRelatedSetAsync,
+    package_manager6_RequestAddPackageAsync,
+};
+
 struct package_manager_statics
 {
     IActivationFactory IActivationFactory_iface;
@@ -406,6 +529,7 @@ static HRESULT WINAPI factory_ActivateInstance( IActivationFactory *iface, IInsp
 
     impl->IPackageManager_iface.lpVtbl = &package_manager_vtbl;
     impl->IPackageManager2_iface.lpVtbl = &package_manager2_vtbl;
+    impl->IPackageManager6_iface.lpVtbl = &package_manager6_vtbl;
     impl->ref = 1;
 
     *instance = (IInspectable *)&impl->IPackageManager_iface;

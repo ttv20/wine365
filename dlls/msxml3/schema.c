@@ -918,12 +918,12 @@ static void cache_remove_entry(schema_cache *cache, const xmlChar *uri)
 
 static xmlDocPtr create_xmldoc_for_text(BSTR xml)
 {
-    xmlChar *str = xmlchar_from_wchar(xml);
-    xmlDocPtr doc;
-
-    doc = xmlParseMemory((const char *)str, xmlStrlen(str));
-    free(str);
-    return doc;
+    /* A BSTR is already decoded text.  Parsing a UTF-8 conversion of it lets
+     * an encoding declaration left in the DOM override the actual encoding.
+     * In particular, an XML declaration specifying UTF-16 then makes libxml2
+     * reject the UTF-8 buffer. */
+    return xmlReadMemory((const char *)xml, SysStringLen(xml) * sizeof(WCHAR),
+            NULL, "UTF-16LE", 0);
 }
 
 /* This one adds all namespaces defined in document to a cache, without anything

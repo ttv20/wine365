@@ -1639,6 +1639,28 @@ LONG WINAPI DECLSPEC_HOTPATCH GetPackagesByPackageFamily(const WCHAR *family_nam
 }
 
 /***********************************************************************
+ *         FindPackagesByPackageFamily   (kernelbase.@)
+ *
+ * Office mso.dll imports this.  Return "no packages" so callers treat
+ * the process as non-Store / unpackaged.
+ */
+LONG WINAPI FindPackagesByPackageFamily( const WCHAR *family_name, UINT32 package_filters, UINT32 *count,
+                                         WCHAR **full_names, UINT32 *buffer_len, WCHAR *buffer,
+                                         UINT32 *package_properties )
+{
+    FIXME( "(%s %#x %p %p %p %p %p): stub\n", debugstr_w(family_name), package_filters, count,
+            full_names, buffer_len, buffer, package_properties );
+
+    if (!count || !buffer_len)
+        return ERROR_INVALID_PARAMETER;
+
+    *count = 0;
+    *buffer_len = 0;
+    if (package_properties) *package_properties = 0;
+    return ERROR_SUCCESS;
+}
+
+/***********************************************************************
  *         GetPackagePathByFullName   (kernelbase.@)
  */
 LONG WINAPI GetPackagePathByFullName(const WCHAR *name, UINT32 *len, WCHAR *path)

@@ -1049,3 +1049,36 @@ NTSTATUS WINAPI RtlSetCurrentDirectory_U(const UNICODE_STRING* dir)
     if (old_handle) NtClose( old_handle );
     return nts;
 }
+
+/* Query flags for NtQueryDirectoryFileEx (SL_* from WDK). */
+#ifndef SL_RESTART_SCAN
+#define SL_RESTART_SCAN                0x00000001
+#define SL_RETURN_SINGLE_ENTRY         0x00000002
+#define SL_INDEX_SPECIFIED             0x00000004
+#define SL_RETURN_ON_DISK_ENTRIES_ONLY 0x00000008
+#define SL_NO_CURSOR_UPDATE_QUERY      0x00000010
+#endif
+
+/******************************************************************************
+ *              NtQueryDirectoryFileEx   (NTDLL.@)
+ *
+ * Thin wrapper used by Office App-V path enumeration.  Maps QueryFlags onto
+ * NtQueryDirectoryFile's single_entry / restart_scan booleans.
+ */
+NTSTATUS WINAPI NtQueryDirectoryFileEx( HANDLE handle, HANDLE event, PIO_APC_ROUTINE apc_routine,
+                                        void *apc_context, IO_STATUS_BLOCK *io, void *buffer,
+                                        ULONG length, FILE_INFORMATION_CLASS info_class,
+                                        ULONG query_flags, UNICODE_STRING *mask )
+{
+    BOOLEAN single_entry = !!(query_flags & SL_RETURN_SINGLE_ENTRY);
+    BOOLEAN restart_scan = !!(query_flags & (SL_RESTART_SCAN | SL_NO_CURSOR_UPDATE_QUERY));
+
+    TRACE( "(%p %p %p %p %p %p %#lx %u %#lx %s)\n", handle, event, apc_routine, apc_context, io,
+           buffer, length, info_class, query_flags, debugstr_us(mask) );
+
+    if (query_flags & SL_INDEX_SPECIFIED)
+        FIXME( "SL_INDEX_SPECIFIED not supported\n" );
+
+    return NtQueryDirectoryFile( handle, event, apc_routine, apc_context, io, buffer, length,
+                                 info_class, single_entry, mask, restart_scan );
+}

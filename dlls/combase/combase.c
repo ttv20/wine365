@@ -129,6 +129,7 @@ struct registered_class
 };
 
 static struct list registered_classes = LIST_INIT(registered_classes);
+static IActivationFilter *registered_activation_filter;
 
 static CRITICAL_SECTION registered_classes_cs;
 static CRITICAL_SECTION_DEBUG registered_classes_cs_debug =
@@ -452,6 +453,7 @@ static ULONG WINAPI global_options_Release(IGlobalOptions *iface)
 
 static HRESULT WINAPI global_options_Set(IGlobalOptions *iface, GLOBALOPT_PROPERTIES property, ULONG_PTR value)
 {
+    WARN("GLOBALOPTIONS Set property %u value %Ix\n", property, value);
     FIXME("%p, %u, %Ix.\n", iface, property, value);
 
     return S_OK;
@@ -459,6 +461,7 @@ static HRESULT WINAPI global_options_Set(IGlobalOptions *iface, GLOBALOPT_PROPER
 
 static HRESULT WINAPI global_options_Query(IGlobalOptions *iface, GLOBALOPT_PROPERTIES property, ULONG_PTR *value)
 {
+    WARN("GLOBALOPTIONS Query property %u output %p\n", property, value);
     TRACE("%p, %u, %p.\n", iface, property, value);
 
     if (property < COMGLB_EXCEPTION_HANDLING || property > COMGLB_PROPERTIES_RESERVED3)
@@ -1696,9 +1699,21 @@ HRESULT WINAPI DECLSPEC_HOTPATCH CoCreateInstance(REFCLSID rclsid, IUnknown *out
         REFIID riid, void **obj)
 {
     MULTI_QI multi_qi = { .pIID = riid };
+    WCHAR clsid_string[40], iid_string[40];
+    char marker[256];
     HRESULT hr;
 
+    StringFromGUID2(rclsid, clsid_string, ARRAY_SIZE(clsid_string));
+    StringFromGUID2(riid, iid_string, ARRAY_SIZE(iid_string));
+    snprintf(marker, sizeof(marker), "GLOBALOPTIONS ENTRY CoCreateInstance clsid %ls context %#lx iid %ls\n",
+            clsid_string, cls_context, iid_string);
+    OutputDebugStringA(marker);
+
     TRACE("%s, %p, %#lx, %s, %p.\n", debugstr_guid(rclsid), outer, cls_context, debugstr_guid(riid), obj);
+
+    if (IsEqualCLSID(rclsid, &CLSID_GlobalOptions))
+        WARN("GLOBALOPTIONS CoCreateInstance clsid %s context %#lx iid %s\n",
+                debugstr_guid(rclsid), cls_context, debugstr_guid(riid));
 
     if (!obj)
         return E_POINTER;
@@ -1721,10 +1736,11 @@ HRESULT WINAPI CoCreateInstanceFromApp(REFCLSID rclsid, IUnknown *outer, DWORD c
             count, results);
 }
 
-static HRESULT com_get_class_object(REFCLSID rclsid, DWORD clscontext,
+static HRESULT com_get_class_object(const CLSID *rclsid, DWORD clscontext,
         COSERVERINFO *server_info, REFIID riid, void **obj)
 {
     struct class_reg_data clsreg = { 0 };
+    CLSID filtered_clsid;
     HRESULT hr = E_UNEXPECTED;
     IUnknown *registered_obj;
     struct apartment *apt;
@@ -1733,6 +1749,30 @@ static HRESULT com_get_class_object(REFCLSID rclsid, DWORD clscontext,
         return E_INVALIDARG;
 
     *obj = NULL;
+
+    if (registered_activation_filter)
+    {
+        filtered_clsid = *rclsid;
+        hr = IActivationFilter_HandleActivation(registered_activation_filter,
+                ACTIVATIONTYPE_UNCATEGORIZED, rclsid, &filtered_clsid);
+        if (IsEqualCLSID(rclsid, &CLSID_GlobalOptions))
+        {
+            WCHAR filtered_string[40];
+            char marker[160];
+
+            StringFromGUID2(&filtered_clsid, filtered_string, ARRAY_SIZE(filtered_string));
+            snprintf(marker, sizeof(marker), "GLOBALOPTIONS activation filter hr %#lx result %ls\n", hr,
+                    filtered_string);
+            OutputDebugStringA(marker);
+        }
+        if (FAILED(hr))
+            return hr;
+        if (hr == S_OK && !(IsEqualCLSID(rclsid, &CLSID_GlobalOptions) && IsEqualCLSID(&filtered_clsid, &CLSID_NULL)))
+            rclsid = &filtered_clsid;
+    }
+
+    if (IsEqualCLSID(rclsid, &CLSID_GlobalOptions))
+        OutputDebugStringA("GLOBALOPTIONS com_get_class_object builtin candidate\n");
 
     if (!(apt = apartment_get_current_or_mta()))
     {
@@ -1892,12 +1932,26 @@ static HRESULT com_get_class_object(REFCLSID rclsid, DWORD clscontext,
 HRESULT WINAPI DECLSPEC_HOTPATCH CoCreateInstanceEx(REFCLSID rclsid, IUnknown *outer, DWORD cls_context,
         COSERVERINFO *server_info, ULONG count, MULTI_QI *results)
 {
+    WCHAR clsid_string[40], iid_string[40];
+    char marker[256];
     IClassFactory *factory;
     IUnknown *unk = NULL;
     CLSID clsid;
     HRESULT hr;
 
+    StringFromGUID2(rclsid, clsid_string, ARRAY_SIZE(clsid_string));
+    if (count && results) StringFromGUID2(results[0].pIID, iid_string, ARRAY_SIZE(iid_string));
+    else lstrcpyW(iid_string, L"(none)");
+    snprintf(marker, sizeof(marker), "GLOBALOPTIONS ENTRY CoCreateInstanceEx clsid %ls context %#lx iid %ls\n",
+            clsid_string, cls_context, iid_string);
+    OutputDebugStringA(marker);
+
     TRACE("%s, %p, %#lx, %p, %lu, %p\n", debugstr_guid(rclsid), outer, cls_context, server_info, count, results);
+
+    if (IsEqualCLSID(rclsid, &CLSID_GlobalOptions))
+        WARN("GLOBALOPTIONS CoCreateInstanceEx clsid %s context %#lx count %lu iid %s\n",
+                debugstr_guid(rclsid), cls_context, count,
+                count && results ? debugstr_guid(results[0].pIID) : "(none)");
 
     if (!count || !results)
         return E_INVALIDARG;
@@ -1909,7 +1963,15 @@ HRESULT WINAPI DECLSPEC_HOTPATCH CoCreateInstanceEx(REFCLSID rclsid, IUnknown *o
 
     clsid = *rclsid;
     if (!(cls_context & CLSCTX_APPCONTAINER))
-        CoGetTreatAsClass(rclsid, &clsid);
+    {
+        hr = CoGetTreatAsClass(rclsid, &clsid);
+        if (IsEqualCLSID(rclsid, &CLSID_GlobalOptions))
+        {
+            StringFromGUID2(&clsid, clsid_string, ARRAY_SIZE(clsid_string));
+            snprintf(marker, sizeof(marker), "GLOBALOPTIONS TreatAs hr %#lx result %ls\n", hr, clsid_string);
+            OutputDebugStringA(marker);
+        }
+    }
 
     if (FAILED(hr = com_get_class_object(&clsid, cls_context, NULL, &IID_IClassFactory, (void **)&factory)))
         return hr;
@@ -3562,9 +3624,17 @@ BOOL WINAPI CoIsOle1Class(REFCLSID clsid)
  */
 HRESULT WINAPI CoRegisterActivationFilter(IActivationFilter *filter)
 {
-    FIXME("%p stub\n", filter);
+    FIXME("%p semi-stub\n", filter);
 
-    return E_NOTIMPL;
+    if (!filter)
+        return E_INVALIDARG;
+
+    if (InterlockedCompareExchangePointer((void **)&registered_activation_filter, filter, NULL))
+        return E_ACCESSDENIED;
+
+    IActivationFilter_AddRef(filter);
+
+    return S_OK;
 }
 
 static void com_cleanup_tlsdata(void)

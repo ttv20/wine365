@@ -505,7 +505,7 @@
 @ stdcall -import FindFirstVolumeW(ptr long)
 @ stdcall -import FindNextChangeNotification(long)
 @ stdcall -import FindNextFileA(long ptr)
-# @ stub FindNextFileNameW
+@ stdcall -import FindNextFileNameW(ptr ptr ptr)
 @ stdcall -import FindNextFileW(long ptr)
 @ stdcall -import FindNextStreamW(long ptr)
 @ stdcall FindNextVolumeA(long ptr long)
@@ -514,6 +514,7 @@
 @ stdcall -import FindNextVolumeW(long ptr long)
 @ stdcall -import FindNLSString(long long wstr long wstr long ptr)
 @ stdcall -import FindNLSStringEx(wstr long wstr long wstr long ptr ptr ptr long)
+@ stdcall -import FindPackagesByPackageFamily(wstr long ptr ptr ptr ptr ptr)
 @ stdcall FindResourceA(long str str)
 @ stdcall FindResourceExA(long str str long)
 @ stdcall -import FindResourceExW(long wstr wstr long)
@@ -1445,7 +1446,7 @@
 @ stdcall -import SetFilePointer(long long ptr long)
 @ stdcall -import SetFilePointerEx(long int64 ptr long)
 # @ stub SetFileShortNameA
-# @ stub SetFileShortNameW
+@ stdcall -import SetFileShortNameW(long wstr)
 @ stdcall -import SetFileTime(long ptr ptr ptr)
 @ stdcall -import SetFileValidData(ptr int64)
 @ stdcall SetFirmwareEnvironmentVariableA(str str ptr long)

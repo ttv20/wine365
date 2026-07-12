@@ -536,7 +536,9 @@ typedef void (*xpath_function)(struct xpath_parser_context *ctxt, int nargs);
 static void xpath_parser_context_set_error(struct xpath_parser_context *ctxt, int error)
 {
     if (ctxt->error == XPATH_EXPRESSION_OK)
+    {
         ctxt->error = error;
+    }
 }
 
 static void * xpath_calloc(struct xpath_parser_context *ctxt, size_t count, size_t size)
@@ -1821,6 +1823,17 @@ static void xpath_compile_path_expr(struct xpath_parser_context *ctxt)
         {
             int len = wcslen(name);
 
+            /* Function names may be qualified.  xpath_scan_name() stops at
+             * the namespace separator, so include the local name when
+             * looking ahead for the opening parenthesis. */
+            if (ctxt->cur[len] == ':' && ctxt->cur[len + 1] != ':'
+                    && xml_is_ncname_startchar(ctxt->cur[len + 1]))
+            {
+                ++len;
+                while (xml_is_ncnamechar(ctxt->cur[len]))
+                    ++len;
+            }
+
             while (ctxt->cur[len])
             {
                 if (!xml_is_space(ctxt->cur[len]))
@@ -2588,7 +2601,8 @@ static bool xpath_equal_values_common(struct xpath_parser_context *ctxt,
                     ret = (arg2->boolval == ret);
                     break;
                 case XPATH_STRING:
-                    ret = !wcscmp(arg1->stringval, arg2->stringval);
+                    ret = !wcscmp(arg1->stringval ? arg1->stringval : L"",
+                            arg2->stringval ? arg2->stringval : L"");
                     break;
                 case XPATH_NUMBER:
                     xpath_push_value(ctxt, arg1);
@@ -4975,6 +4989,7 @@ static xpath_function_ptr xpath_lookup_function(struct xpath_context *ctxt, cons
     for (size_t i = 0; i < ctxt->functions.count; ++i)
     {
         if (wcscmp(ctxt->functions.entries[i].name, name)) continue;
+        if (!!uri != !!ctxt->functions.entries[i].uri) continue;
         if (uri && wcscmp(ctxt->functions.entries[i].uri, uri)) continue;
         return ctxt->functions.entries[i].func;
     }
@@ -5518,7 +5533,6 @@ struct xpath_object * xpath_eval(const WCHAR *str, struct xpath_context *ctx)
         else if (ctxt->stack.count)
             ERR("Stack not empty\n");
     }
-
     xpath_free_parser_context(ctxt);
     return res;
 }
@@ -6738,6 +6752,44 @@ static WCHAR * xpath_pop_string(struct xpath_parser_context *ctxt)
     return ret;
 }
 
+static void xpath_ms_string_compare(struct xpath_parser_context *ctxt, int nargs)
+{
+    WCHAR *left = NULL, *right = NULL, *language = NULL, *options = NULL;
+    int ret;
+
+    if (nargs < 2 || nargs > 4)
+    {
+        xpath_parser_context_set_error(ctxt, XPATH_INVALID_ARITY);
+        return;
+    }
+
+    if (nargs == 4)
+        options = xpath_pop_string(ctxt);
+    if (nargs >= 3)
+        language = xpath_pop_string(ctxt);
+    right = xpath_pop_string(ctxt);
+    left = xpath_pop_string(ctxt);
+
+    if (ctxt->error != XPATH_EXPRESSION_OK || !left || !right)
+        goto done;
+
+    /* MSXML's "i" option ignores case, kana type, and character width.  The
+     * App-V metadata used by Office contains ASCII filesystem paths, for
+     * which a case-insensitive Unicode comparison has the same result. */
+    if (options && wcschr(options, 'i'))
+        ret = wcsicmp(left, right);
+    else
+        ret = wcscmp(left, right);
+
+    xpath_push_value(ctxt, xpath_new_number(ctxt, ret < 0 ? -1.0 : ret > 0 ? 1.0 : 0.0));
+
+done:
+    free(left);
+    free(right);
+    free(language);
+    free(options);
+}
+
 /* XSLPattern */
 
 /**
@@ -7679,6 +7731,8 @@ static void xpath_register_xpath_functions(struct xpath_context *ctxt)
     xpath_register_func(ctxt, L"sum", xpath_builtin_sum);
     xpath_register_func(ctxt, L"true", xpath_builtin_true);
     xpath_register_func(ctxt, L"translate", xpath_builtin_translate);
+    xpath_register_func_uri(ctxt, L"string-compare", L"urn:schemas-microsoft-com:xslt",
+            xpath_ms_string_compare);
 }
 
 static void xpath_register_xslpattern_functions(struct xpath_context *ctxt)

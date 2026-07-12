@@ -1,0 +1,5 @@
+TESTDLL = sppc.dll
+IMPORTS = sppc
+
+SOURCES = \
+	sppc.c

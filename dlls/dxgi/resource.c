@@ -385,9 +385,13 @@ static HRESULT STDMETHODCALLTYPE dxgi_resource_GetDevice(IDXGIResource1 *iface, 
 /* IDXGIResource methods */
 static HRESULT STDMETHODCALLTYPE dxgi_resource_GetSharedHandle(IDXGIResource1 *iface, HANDLE *shared_handle)
 {
-    FIXME("iface %p, shared_handle %p stub!\n", iface, shared_handle);
+    FIXME("iface %p, shared_handle %p returning a null handle.\n", iface, shared_handle);
 
-    return E_NOTIMPL;
+    if (!shared_handle)
+        return DXGI_ERROR_INVALID_CALL;
+
+    *shared_handle = NULL;
+    return S_OK;
 }
 
 static HRESULT STDMETHODCALLTYPE dxgi_resource_GetUsage(IDXGIResource1 *iface, DXGI_USAGE *usage)

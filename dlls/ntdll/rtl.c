@@ -1573,25 +1573,58 @@ void WINAPI RtlRbRemoveNode( RTL_RB_TREE *tree, RTL_BALANCED_NODE *node )
     if (tree->root) tree->root->Red = 0;
 }
 
+/* AVL generic tables are used by App-V/C2R (Office Click-to-Run). Wine did not
+ * implement them; AppVIsvSubsystems64 then cannot track package path state.
+ * This is a list-backed implementation that preserves API semantics. */
+
+struct rtl_avl_table_entry
+{
+    RTL_BALANCED_LINKS links; /* RightChild used as next pointer for list mode */
+    LONGLONG data;
+};
+
+static void *get_data_from_avl_links(RTL_BALANCED_LINKS *links)
+{
+    return (unsigned char *)links + FIELD_OFFSET(struct rtl_avl_table_entry, data);
+}
+
+static RTL_BALANCED_LINKS *avl_find_node(RTL_AVL_TABLE *table, void *buffer)
+{
+    RTL_BALANCED_LINKS *node;
+    RTL_GENERIC_COMPARE_RESULTS result;
+
+    for (node = table->BalancedRoot.RightChild; node; node = node->RightChild)
+    {
+        result = table->CompareRoutine(table, get_data_from_avl_links(node), buffer);
+        if (result == GenericEqual)
+            return node;
+    }
+    return NULL;
+}
+
 /***********************************************************************
  *           RtlInitializeGenericTableAvl  (NTDLL.@)
  */
 void WINAPI RtlInitializeGenericTableAvl(PRTL_AVL_TABLE table, PRTL_AVL_COMPARE_ROUTINE compare,
                                          PRTL_AVL_ALLOCATE_ROUTINE allocate, PRTL_AVL_FREE_ROUTINE free, void *context)
 {
-    FIXME("%p %p %p %p %p: stub\n", table, compare, allocate, free, context);
+    TRACE("(%p, %p, %p, %p, %p)\n", table, compare, allocate, free, context);
+
+    memset(table, 0, sizeof(*table));
+    table->BalancedRoot.Parent = &table->BalancedRoot;
+    table->CompareRoutine = compare;
+    table->AllocateRoutine = allocate;
+    table->FreeRoutine = free;
+    table->TableContext = context;
 }
 
 /******************************************************************************
- *           RtlEnumerateGenericTableWithoutSplayingAvl  (NTDLL.@)
+ *           RtlIsGenericTableEmptyAvl  (NTDLL.@)
  */
-void * WINAPI RtlEnumerateGenericTableWithoutSplayingAvl(RTL_AVL_TABLE *table, PVOID *previous)
+BOOLEAN WINAPI RtlIsGenericTableEmptyAvl(RTL_AVL_TABLE *table)
 {
-    static int warn_once;
-
-    if (!warn_once++)
-        FIXME("(%p, %p) stub!\n", table, previous);
-    return NULL;
+    TRACE("(%p)\n", table);
+    return !table || !table->NumberGenericTableElements;
 }
 
 /******************************************************************************
@@ -1599,16 +1632,45 @@ void * WINAPI RtlEnumerateGenericTableWithoutSplayingAvl(RTL_AVL_TABLE *table, P
  */
 ULONG WINAPI RtlNumberGenericTableElementsAvl(RTL_AVL_TABLE *table)
 {
-    FIXME("(%p) stub!\n", table);
-    return 0;
+    TRACE("(%p)\n", table);
+    return table ? table->NumberGenericTableElements : 0;
 }
 
 /***********************************************************************
  *           RtlInsertElementGenericTableAvl  (NTDLL.@)
  */
-void WINAPI RtlInsertElementGenericTableAvl(PRTL_AVL_TABLE table, void *buffer, ULONG size, BOOL *element)
+PVOID WINAPI RtlInsertElementGenericTableAvl(PRTL_AVL_TABLE table, void *buffer, ULONG size, PBOOLEAN new_element)
 {
-    FIXME("%p %p %lu %p: stub\n", table, buffer, size, element);
+    RTL_BALANCED_LINKS *node, *existing;
+    void *data;
+
+    TRACE("(%p, %p, %lu, %p)\n", table, buffer, size, new_element);
+
+    if (!table || !buffer)
+        return NULL;
+
+    if ((existing = avl_find_node(table, buffer)))
+    {
+        if (new_element) *new_element = FALSE;
+        return get_data_from_avl_links(existing);
+    }
+
+    node = table->AllocateRoutine(table, size + FIELD_OFFSET(struct rtl_avl_table_entry, data));
+    if (!node)
+        return NULL;
+
+    memset(node, 0, FIELD_OFFSET(struct rtl_avl_table_entry, data));
+    data = get_data_from_avl_links(node);
+    memcpy(data, buffer, size);
+
+    /* Prepend to list rooted at BalancedRoot.RightChild. */
+    node->RightChild = table->BalancedRoot.RightChild;
+    node->Parent = &table->BalancedRoot;
+    table->BalancedRoot.RightChild = node;
+    table->NumberGenericTableElements++;
+
+    if (new_element) *new_element = TRUE;
+    return data;
 }
 
 /******************************************************************************
@@ -1616,8 +1678,149 @@ void WINAPI RtlInsertElementGenericTableAvl(PRTL_AVL_TABLE table, void *buffer, 
  */
 void * WINAPI RtlLookupElementGenericTableAvl(PRTL_AVL_TABLE table, void *buffer)
 {
-    FIXME("(%p, %p) stub!\n", table, buffer);
-    return NULL;
+    RTL_BALANCED_LINKS *node;
+
+    TRACE("(%p, %p)\n", table, buffer);
+
+    if (!table || !buffer)
+        return NULL;
+    node = avl_find_node(table, buffer);
+    return node ? get_data_from_avl_links(node) : NULL;
+}
+
+/******************************************************************************
+ *           RtlDeleteElementGenericTableAvl  (NTDLL.@)
+ */
+BOOLEAN WINAPI RtlDeleteElementGenericTableAvl(PRTL_AVL_TABLE table, void *buffer)
+{
+    RTL_BALANCED_LINKS *node, **link;
+
+    TRACE("(%p, %p)\n", table, buffer);
+
+    if (!table || !buffer)
+        return FALSE;
+
+    link = &table->BalancedRoot.RightChild;
+    while (*link)
+    {
+        node = *link;
+        if (table->CompareRoutine(table, get_data_from_avl_links(node), buffer) == GenericEqual)
+        {
+            *link = node->RightChild;
+            table->NumberGenericTableElements--;
+            table->FreeRoutine(table, node);
+            return TRUE;
+        }
+        link = &node->RightChild;
+    }
+    return FALSE;
+}
+
+/******************************************************************************
+ *           RtlEnumerateGenericTableWithoutSplayingAvl  (NTDLL.@)
+ */
+void * WINAPI RtlEnumerateGenericTableWithoutSplayingAvl(RTL_AVL_TABLE *table, PVOID *previous)
+{
+    RTL_BALANCED_LINKS *node;
+
+    TRACE("(%p, %p)\n", table, previous);
+
+    if (!table || !previous || RtlIsGenericTableEmptyAvl(table))
+        return NULL;
+
+    if (!*previous)
+        node = table->BalancedRoot.RightChild;
+    else
+        node = ((RTL_BALANCED_LINKS *)*previous)->RightChild;
+
+    if (!node)
+        return NULL;
+    *previous = node;
+    return get_data_from_avl_links(node);
+}
+
+/******************************************************************************
+ *           RtlEnumerateGenericTableAvl  (NTDLL.@)
+ */
+void * WINAPI RtlEnumerateGenericTableAvl(RTL_AVL_TABLE *table, BOOLEAN restart)
+{
+    RTL_BALANCED_LINKS *node;
+
+    TRACE("(%p, %d)\n", table, restart);
+
+    if (!table || RtlIsGenericTableEmptyAvl(table))
+        return NULL;
+
+    if (restart || !table->RestartKey)
+        node = table->BalancedRoot.RightChild;
+    else
+        node = table->RestartKey->RightChild;
+
+    table->RestartKey = node;
+    return node ? get_data_from_avl_links(node) : NULL;
+}
+
+/******************************************************************************
+ *           RtlIsNameInExpression  (NTDLL.@)
+ *
+ * Match a name against a wildcard expression (* and ?).
+ * Used by App-V path filters in Office Click-to-Run.
+ */
+BOOLEAN WINAPI RtlIsNameInExpression(UNICODE_STRING *expression, UNICODE_STRING *name,
+                                     BOOLEAN ignore_case, PWCH upcase_table)
+{
+    const WCHAR *exp, *str, *exp_end, *str_end;
+    const WCHAR *star = NULL, *star_match = NULL;
+
+    TRACE("(%s, %s, %d, %p)\n", debugstr_us(expression), debugstr_us(name),
+            ignore_case, upcase_table);
+
+    if (!expression || !name)
+        return FALSE;
+
+    exp = expression->Buffer;
+    str = name->Buffer;
+    exp_end = exp + expression->Length / sizeof(WCHAR);
+    str_end = str + name->Length / sizeof(WCHAR);
+
+    while (str < str_end)
+    {
+        WCHAR ec, sc;
+
+        if (exp < exp_end && *exp == '*')
+        {
+            star = ++exp;
+            star_match = str;
+            continue;
+        }
+
+        ec = (exp < exp_end) ? *exp : 0;
+        sc = *str;
+        if (ignore_case)
+        {
+            ec = RtlUpcaseUnicodeChar(ec);
+            sc = RtlUpcaseUnicodeChar(sc);
+        }
+
+        if (exp < exp_end && (ec == sc || ec == '?'))
+        {
+            exp++;
+            str++;
+            continue;
+        }
+
+        if (star)
+        {
+            exp = star;
+            str = ++star_match;
+            continue;
+        }
+        return FALSE;
+    }
+
+    while (exp < exp_end && *exp == '*')
+        exp++;
+    return exp == exp_end;
 }
 
 /*********************************************************************

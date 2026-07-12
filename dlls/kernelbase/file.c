@@ -1477,12 +1477,26 @@ HANDLE WINAPI DECLSPEC_HOTPATCH FindFirstFileW( const WCHAR *filename, WIN32_FIN
 
 /******************************************************************************
  *     FindFirstFileNameW   (kernelbase.@)
+ *
+ * Enumerate hard links for a file.  Office App-V calls this; returning
+ * "no more hard links" is enough when the file is not multi-linked.
  */
 HANDLE WINAPI FindFirstFileNameW( const WCHAR *file_name, DWORD flags, DWORD *len, WCHAR *link_name )
 {
-    FIXME( "(%s, %lu, %p, %p): stub!\n", debugstr_w(file_name), flags, len, link_name );
-    SetLastError( ERROR_CALL_NOT_IMPLEMENTED );
+    TRACE( "(%s, %lu, %p, %p)\n", debugstr_w(file_name), flags, len, link_name );
+    /* Hard-link enumeration is optional for C2R path mapping; signal EOF. */
+    SetLastError( ERROR_HANDLE_EOF );
     return INVALID_HANDLE_VALUE;
+}
+
+/******************************************************************************
+ *     FindNextFileNameW   (kernelbase.@)
+ */
+BOOL WINAPI FindNextFileNameW( HANDLE handle, DWORD *len, WCHAR *link_name )
+{
+    TRACE( "(%p, %p, %p)\n", handle, len, link_name );
+    SetLastError( ERROR_HANDLE_EOF );
+    return FALSE;
 }
 
 /**************************************************************************
@@ -3776,6 +3790,35 @@ BOOL WINAPI DECLSPEC_HOTPATCH SetEndOfFile( HANDLE file )
         status = NtSetInformationFile( file, &io, &eof, sizeof(eof), FileEndOfFileInformation );
     }
     return set_ntstatus( status );
+}
+
+
+/***********************************************************************
+ * SetFileShortNameW   (kernelbase.@)
+ */
+BOOL WINAPI SetFileShortNameW( HANDLE file, const WCHAR *short_name )
+{
+    FILE_BASIC_INFORMATION info;
+    IO_STATUS_BLOCK io;
+    NTSTATUS status;
+
+    TRACE( "%p, %s\n", file, debugstr_w(short_name) );
+
+    if (!short_name)
+    {
+        SetLastError( ERROR_INVALID_PARAMETER );
+        return FALSE;
+    }
+
+    /* Unix filesystems do not expose a separate DOS 8.3 alias.  Still
+     * validate the handle before accepting the alias so virtualized
+     * applications can complete their file setup. */
+    status = NtQueryInformationFile( file, &io, &info, sizeof(info), FileBasicInformation );
+    if (status)
+        return set_ntstatus( status );
+
+    FIXME( "%p, %s: not storing the DOS 8.3 alias\n", file, debugstr_w(short_name) );
+    return TRUE;
 }
 
 

@@ -317,6 +317,7 @@
 @ stdcall -syscall=0x0015 NtQueryDefaultLocale(long ptr)
 @ stdcall -syscall=0x0044 NtQueryDefaultUILanguage(ptr)
 @ stdcall -syscall=0x0035 NtQueryDirectoryFile(long long ptr ptr ptr ptr long long long ptr long)
+@ stdcall NtQueryDirectoryFileEx(long long ptr ptr ptr ptr long long long ptr)
 @ stdcall -syscall NtQueryDirectoryObject(long ptr long long long ptr ptr)
 @ stdcall -syscall NtQueryEaFile(long ptr ptr long long ptr long ptr long)
 @ stdcall -syscall=0x0056 NtQueryEvent(long long ptr long ptr)
@@ -626,7 +627,7 @@
 @ stdcall RtlDeleteCriticalSection(ptr)
 @ stdcall -arch=!i386 RtlDeleteGrowableFunctionTable(ptr)
 @ stdcall RtlDeleteElementGenericTable(ptr ptr)
-@ stub RtlDeleteElementGenericTableAvl
+@ stdcall RtlDeleteElementGenericTableAvl(ptr ptr)
 @ cdecl -arch=!i386 RtlDeleteFunctionTable(ptr)
 @ stdcall RtlDeleteNoSplay(ptr ptr)
 @ stub RtlDeleteOwnersRanges
@@ -671,7 +672,7 @@
 @ stdcall RtlEnterCriticalSection(ptr)
 @ stub RtlEnumProcessHeaps
 @ stdcall RtlEnumerateGenericTable(ptr long)
-# @ stub RtlEnumerateGenericTableAvl
+@ stdcall RtlEnumerateGenericTableAvl(ptr long)
 # @ stub RtlEnumerateGenericTableLikeADirectory
 @ stdcall RtlEnumerateGenericTableWithoutSplaying(ptr ptr)
 @ stdcall RtlEnumerateGenericTableWithoutSplayingAvl(ptr ptr)
@@ -869,7 +870,8 @@
 @ stdcall RtlIsDosDeviceName_U(wstr)
 @ stdcall -arch=x86_64 -norelay RtlIsEcCode(ptr)
 @ stdcall RtlIsGenericTableEmpty(ptr)
-# @ stub RtlIsGenericTableEmptyAvl
+@ stdcall RtlIsGenericTableEmptyAvl(ptr)
+@ stdcall RtlIsNameInExpression(ptr ptr long ptr)
 @ stdcall RtlIsNameLegalDOS8Dot3(ptr ptr ptr)
 @ stdcall RtlIsNormalizedString(long wstr long ptr)
 @ stdcall RtlIsProcessorFeaturePresent(long)
@@ -1395,6 +1397,7 @@
 @ stdcall -private ZwQueryDefaultLocale(long ptr) NtQueryDefaultLocale
 @ stdcall -private ZwQueryDefaultUILanguage(ptr) NtQueryDefaultUILanguage
 @ stdcall -private ZwQueryDirectoryFile(long long ptr ptr ptr ptr long long long ptr long) NtQueryDirectoryFile
+@ stdcall -private ZwQueryDirectoryFileEx(long long ptr ptr ptr ptr long long long ptr) NtQueryDirectoryFileEx
 @ stdcall -private ZwQueryDirectoryObject(long ptr long long long ptr ptr) NtQueryDirectoryObject
 @ stdcall -private ZwQueryEaFile(long ptr ptr long long ptr long ptr long) NtQueryEaFile
 @ stdcall -private ZwQueryEvent(long long ptr long ptr) NtQueryEvent

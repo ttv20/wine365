@@ -424,6 +424,7 @@ static void* _create_object(const GUID *clsid, const char *name, const IID *iid,
 static void test_schema_refs(void)
 {
     static const WCHAR xdr_schema_xml[] =
+        L"<?xml version=\"1.0\" encoding=\"utf-16\"?>\n"
         L"<Schema xmlns=\"urn:schemas-microsoft-com:xml-data\"\nxmlns:dt=\"urn:schemas-microsoft-com:datatypes\">\n</Schema>\n";
     IXMLDOMDocument2 *doc;
     IXMLDOMNode *node;
@@ -622,6 +623,39 @@ static void test_schema_refs(void)
     ok(refcount == 1, "Unexpected refcount %ld.\n", refcount);
     refcount = IXMLDOMSchemaCollection_Release(cache);
     ok(!refcount, "Unexpected refcount %ld.\n", refcount);
+}
+
+static void test_xsd_unicode_escapes(void)
+{
+    static const WCHAR schema_xml[] =
+        L"<?xml version=\"1.0\" encoding=\"utf-16\"?>"
+        L"<xs:schema xmlns:xs=\"http://www.w3.org/2001/XMLSchema\" targetNamespace=\"urn:test\">"
+        L"<xs:simpleType name=\"unicode\"><xs:restriction base=\"xs:string\">"
+        L"<xs:pattern value=\"[^\\uFDD0-\\uFDEF\\uFFF9-\\uFFFF\\p{IsPrivateUse}]+\"/>"
+        L"<xs:pattern value=\"[^\\u0000-\\u0020\\u007F\\u0080-\\u009F]+\"/>"
+        L"</xs:restriction></xs:simpleType></xs:schema>";
+    IXMLDOMSchemaCollection *cache;
+    IXMLDOMDocument2 *doc;
+    VARIANT_BOOL loaded;
+    HRESULT hr;
+
+    doc = create_document_version(60, &IID_IXMLDOMDocument2);
+    cache = create_cache_version(60, &IID_IXMLDOMSchemaCollection);
+    if (!doc || !cache)
+    {
+        if (doc) IXMLDOMDocument2_Release(doc);
+        if (cache) IXMLDOMSchemaCollection_Release(cache);
+        return;
+    }
+
+    hr = IXMLDOMDocument2_loadXML(doc, _bstr_(schema_xml), &loaded);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    ok(loaded == VARIANT_TRUE, "Failed to load schema.\n");
+    hr = IXMLDOMSchemaCollection_add(cache, _bstr_(L"urn:test"), _variantdoc_(doc));
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+
+    IXMLDOMSchemaCollection_Release(cache);
+    IXMLDOMDocument2_Release(doc);
 }
 
 static void test_collection_refs(void)
@@ -1541,6 +1575,7 @@ START_TEST(schema)
     ok( r == S_OK, "failed to init com\n");
 
     test_schema_refs();
+    test_xsd_unicode_escapes();
     test_collection_refs();
     test_length();
     test_collection_content();

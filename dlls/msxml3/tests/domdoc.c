@@ -5368,7 +5368,11 @@ static void test_XPath(void)
         /* String value could only be compared for equality */
         { "//elem[@a <= \"c\"]", "" },
         { "//elem[@a = \"c\"]", "E3.E2.D1" },
+        { "//elem[translate(@a, \"abc\", \"ABC\") = \"C\"]", "E3.E2.D1" },
+        { "//elem[ms:string-compare(@a, \"c\") = 0]", "E3.E2.D1" },
+        { "//elem[ms:string-compare(@a, \"C\", \"\", \"i\") = 0]", "E3.E2.D1" },
         { "//elem[@a != 0]", "E1.E2.D1 E2.E2.D1 E3.E2.D1" },
+        { "//elem[string() = \"\"]", "E1.E2.D1 E2.E2.D1 E3.E2.D1 E4.E2.D1" },
         { NULL },
     };
 
@@ -5404,6 +5408,10 @@ static void test_XPath(void)
 
     /* switch to XPath */
     hr = IXMLDOMDocument2_setProperty(doc, _bstr_("SelectionLanguage"), _variantbstr_("XPath"));
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+
+    hr = IXMLDOMDocument2_setProperty(doc, _bstr_("SelectionNamespaces"),
+            _variantbstr_("xmlns:ms='urn:schemas-microsoft-com:xslt'"));
     ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
 
     hr = IXMLDOMDocument2_loadXML(doc, _bstr_(node_value_cmp), NULL);

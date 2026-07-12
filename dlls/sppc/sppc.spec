@@ -17,8 +17,10 @@
 @ stub SLpSetActivationInProgress
 @ stub SLpTriggerServiceWorker
 @ stub SLpVLActivateProduct
+@ cdecl __wine_sppc_set_auth_session_key(ptr long)
+@ cdecl __wine_sppc_set_expected_hmac(ptr long)
 @ stdcall SLClose(ptr)
-@ stub SLConsumeRight
+@ stdcall SLConsumeRight(ptr ptr ptr wstr ptr)
 @ stub SLDepositMigrationBlob
 @ stub SLDepositOfflineConfirmationId
 @ stub SLDepositOfflineConfirmationIdEx
@@ -30,38 +32,38 @@
 @ stub SLGenerateOfflineInstallationIdEx
 @ stub SLGetActiveLicenseInfo
 @ stub SLGetApplicationInformation
-@ stub SLGetApplicationPolicy
-@ stub SLGetAuthenticationResult
+@ stdcall SLGetApplicationPolicy(ptr wstr ptr ptr ptr)
+@ stdcall SLGetAuthenticationResult(ptr ptr ptr)
 @ stub SLGetEncryptedPIDEx
 @ stub SLGetGenuineInformation
 @ stub SLGetInstalledProductKeyIds
-@ stub SLGetLicense
-@ stub SLGetLicenseFileId
+@ stdcall SLGetLicense(ptr ptr ptr ptr)
+@ stdcall SLGetLicenseFileId(ptr long ptr ptr)
 @ stub SLGetLicenseInformation
 @ stdcall SLGetLicensingStatusInformation(ptr ptr ptr wstr ptr ptr)
 @ stub SLGetPKeyId
-@ stub SLGetPKeyInformation
-@ stub SLGetPolicyInformation
+@ stdcall SLGetPKeyInformation(ptr ptr wstr ptr ptr ptr)
+@ stdcall SLGetPolicyInformation(ptr wstr ptr ptr ptr)
 @ stub SLGetPolicyInformationDWORD
-@ stub SLGetProductSkuInformation
-@ stub SLGetSLIDList
-@ stub SLGetServiceInformation
-@ stub SLInstallLicense
+@ stdcall SLGetProductSkuInformation(ptr ptr wstr ptr ptr ptr)
+@ stdcall SLGetSLIDList(ptr long ptr long ptr ptr)
+@ stdcall SLGetServiceInformation(ptr wstr ptr ptr ptr)
+@ stdcall SLInstallLicense(ptr long ptr ptr)
 @ stub SLInstallProofOfPurchase
 @ stub SLInstallProofOfPurchaseEx
 @ stub SLIsGenuineLocalEx
-@ stub SLLoadApplicationPolicies
+@ stdcall SLLoadApplicationPolicies(ptr ptr long ptr)
 @ stdcall SLOpen(ptr)
 @ stdcall SLPersistApplicationPolicies(ptr ptr long)
 @ stub SLPersistRTSPayloadOverride
 @ stub SLReArm
 @ stub SLRegisterEvent
 @ stub SLRegisterPlugin
-@ stub SLSetAuthenticationData
+@ stdcall SLSetAuthenticationData(ptr long ptr)
 @ stub SLSetCurrentProductKey
 @ stub SLSetGenuineInformation
 @ stub SLUninstallLicense
 @ stub SLUninstallProofOfPurchase
-@ stub SLUnloadApplicationPolicies
+@ stdcall SLUnloadApplicationPolicies(ptr)
 @ stub SLUnregisterEvent
 @ stub SLUnregisterPlugin
