@@ -2136,6 +2136,9 @@ static HRESULT STDMETHODCALLTYPE d2d_device_context_EndDraw(ID2D1DeviceContext6 
     if (tag2)
         *tag2 = context->error.tag2;
 
+    if (context->target.type == D2D_TARGET_COMMAND_LIST)
+        return context->error.code;
+
     if (context->ops && context->ops->device_context_present)
     {
         if (FAILED(hr = context->ops->device_context_present(context->outer_unknown)))
