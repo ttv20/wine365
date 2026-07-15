@@ -36,12 +36,16 @@
 #include "windows.foundation.h"
 #define WIDL_using_Windows_Data_Json
 #include "windows.data.json.h"
+#define WIDL_using_Windows_Security_Authorization_AppCapabilityAccess
+#include "windows.security.authorization.appcapabilityaccess.h"
 
+extern IActivationFactory *app_capability_factory;
 extern IActivationFactory *json_array_factory;
 extern IActivationFactory *json_object_factory;
 extern IActivationFactory *json_value_factory;
 
 HRESULT json_array_push( IJsonArray *iface, IJsonValue *value );
+HRESULT json_value_parse( HSTRING input, IJsonValue **value );
 
 #define DEFINE_IINSPECTABLE_( pfx, iface_type, impl_type, impl_from, iface_mem, expr )             \
     static inline impl_type *impl_from( iface_type *iface )                                        \

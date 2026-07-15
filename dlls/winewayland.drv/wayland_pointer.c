@@ -866,10 +866,11 @@ static BOOL wayland_surface_client_covers_vscreen(struct wayland_surface *surfac
 static void wayland_pointer_update_constraint(struct wl_surface *wl_surface,
                                               RECT *confine_rect,
                                               BOOL covers_vscreen,
+                                              BOOL clip_covers_vscreen,
                                               BOOL force_lock)
 {
     struct wayland_pointer *pointer = &process_wayland.pointer;
-    BOOL needs_relative, needs_lock, needs_confine, is_visible;
+    BOOL needs_relative, needs_lock, needs_confine, has_confine, is_visible;
     static unsigned int once;
 
     if (!process_wayland.zwp_pointer_constraints_v1)
@@ -880,11 +881,15 @@ static void wayland_pointer_update_constraint(struct wl_surface *wl_surface,
     }
 
     is_visible = pointer->cursor.wl_surface || pointer->wp_cursor_shape_device_v1;
+    has_confine = confine_rect && !IsRectEmpty(confine_rect);
     needs_lock = wl_surface &&
-                 (((confine_rect || covers_vscreen) && !is_visible) || force_lock) &&
+                 (((has_confine || covers_vscreen) && !is_visible) || force_lock) &&
                  pointer->wl_pointer;
-    needs_confine = wl_surface && confine_rect && is_visible && !force_lock &&
-                    pointer->wl_pointer;
+    /* A visible pointer is already bounded by the compositor outputs. Avoid
+     * installing a redundant full-virtual-screen confinement, which can also
+     * race a newly mapped fullscreen surface in some compositors. */
+    needs_confine = wl_surface && has_confine && !clip_covers_vscreen &&
+                    is_visible && !force_lock && pointer->wl_pointer;
 
     if (!needs_confine && pointer->zwp_confined_pointer_v1)
     {
@@ -990,7 +995,7 @@ static void wayland_pointer_update_constraint(struct wl_surface *wl_surface,
 
 void wayland_pointer_clear_constraint(void)
 {
-    wayland_pointer_update_constraint(NULL, NULL, FALSE, FALSE);
+    wayland_pointer_update_constraint(NULL, NULL, FALSE, FALSE, FALSE);
 }
 
 /***********************************************************************
@@ -1034,11 +1039,21 @@ BOOL WAYLAND_ClipCursor(const RECT *clip, BOOL reset)
     struct wl_surface *wl_surface = NULL;
     struct wayland_surface *surface = NULL;
     struct wayland_win_data *data;
-    BOOL covers_vscreen = FALSE;
-    RECT confine_rect;
+    BOOL covers_vscreen = FALSE, clip_covers_vscreen = FALSE;
+    RECT confine_rect, vscreen_rect, intersection;
     POINT cursor_pos, warp;
 
     TRACE("clip=%s reset=%d\n", wine_dbgstr_rect(clip), reset);
+
+    if (clip)
+    {
+        vscreen_rect.left = NtUserGetSystemMetrics(SM_XVIRTUALSCREEN);
+        vscreen_rect.top = NtUserGetSystemMetrics(SM_YVIRTUALSCREEN);
+        vscreen_rect.right = vscreen_rect.left + NtUserGetSystemMetrics(SM_CXVIRTUALSCREEN);
+        vscreen_rect.bottom = vscreen_rect.top + NtUserGetSystemMetrics(SM_CYVIRTUALSCREEN);
+        intersect_rect(&intersection, clip, &vscreen_rect);
+        clip_covers_vscreen = EqualRect(&intersection, &vscreen_rect);
+    }
 
     NtUserGetCursorPos(&cursor_pos);
     hwnd = NtUserGetForegroundWindow();
@@ -1072,7 +1087,7 @@ BOOL WAYLAND_ClipCursor(const RECT *clip, BOOL reset)
         }
         else
         {
-            wayland_pointer_update_constraint(wl_surface, NULL, FALSE, TRUE);
+            wayland_pointer_update_constraint(wl_surface, NULL, FALSE, FALSE, TRUE);
         }
         pointer->pending_warp = FALSE;
     }
@@ -1099,6 +1114,7 @@ BOOL WAYLAND_ClipCursor(const RECT *clip, BOOL reset)
     wayland_pointer_update_constraint(wl_surface,
                                       (clip && wl_surface) ? &confine_rect : NULL,
                                       covers_vscreen,
+                                      clip_covers_vscreen,
                                       FALSE);
     pthread_mutex_unlock(&pointer->mutex);
 

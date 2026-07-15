@@ -435,6 +435,13 @@ static HRESULT STDMETHODCALLTYPE d2d_factory_CreateHwndRenderTarget(ID2D1Factory
     HRESULT hr;
 
     TRACE("iface %p, desc %p, hwnd_rt_desc %p, render_target %p.\n", iface, desc, hwnd_rt_desc, render_target);
+    if (GetEnvironmentVariableA("WINE_D2D_TARGET_DIAG", NULL, 0))
+        WARN("OFFICE_D2D CreateHwndRenderTarget hwnd %p size %ux%u present %#x format %#x alpha %#x.\n",
+                hwnd_rt_desc ? hwnd_rt_desc->hwnd : NULL,
+                hwnd_rt_desc ? hwnd_rt_desc->pixelSize.width : 0,
+                hwnd_rt_desc ? hwnd_rt_desc->pixelSize.height : 0,
+                hwnd_rt_desc ? hwnd_rt_desc->presentOptions : 0,
+                desc ? desc->pixelFormat.format : 0, desc ? desc->pixelFormat.alphaMode : 0);
 
     if (FAILED(hr = d2d_factory_get_device(factory, &device)))
         return hr;
@@ -463,6 +470,9 @@ static HRESULT STDMETHODCALLTYPE d2d_factory_CreateDxgiSurfaceRenderTarget(ID2D1
     HRESULT hr;
 
     TRACE("iface %p, surface %p, desc %p, render_target %p.\n", iface, surface, desc, render_target);
+    if (GetEnvironmentVariableA("WINE_D2D_TARGET_DIAG", NULL, 0))
+        WARN("OFFICE_D2D CreateDxgiSurfaceRenderTarget surface %p format %#x alpha %#x.\n",
+                surface, desc ? desc->pixelFormat.format : 0, desc ? desc->pixelFormat.alphaMode : 0);
 
     if (FAILED(hr = IDXGISurface_GetDevice(surface, &IID_IDXGIDevice, (void **)&dxgi_device)))
     {
@@ -493,6 +503,10 @@ static HRESULT STDMETHODCALLTYPE d2d_factory_CreateDCRenderTarget(ID2D1Factory7 
     HRESULT hr;
 
     TRACE("iface %p, desc %p, render_target %p.\n", iface, desc, render_target);
+    if (GetEnvironmentVariableA("WINE_D2D_TARGET_DIAG", NULL, 0))
+        WARN("OFFICE_D2D CreateDCRenderTarget format %#x alpha %#x usage %#x.\n",
+                desc ? desc->pixelFormat.format : 0, desc ? desc->pixelFormat.alphaMode : 0,
+                desc ? desc->usage : 0);
 
     if (FAILED(hr = d2d_factory_get_device(factory, &device)))
         return hr;

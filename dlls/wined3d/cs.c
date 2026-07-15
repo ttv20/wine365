@@ -3311,6 +3311,17 @@ static BOOL wined3d_cs_queue_is_empty(const struct wined3d_cs *cs, const struct 
     return *(volatile ULONG *)&queue->head == queue->tail;
 }
 
+void wined3d_cs_wake(const struct wined3d_cs *cs)
+{
+    if (!cs->thread)
+        return;
+
+    if (pNtAlertThreadByThreadId)
+        pNtAlertThreadByThreadId((HANDLE)(ULONG_PTR)cs->thread_id);
+    else
+        SetEvent(cs->event);
+}
+
 static void wined3d_cs_queue_submit(struct wined3d_cs_queue *queue, struct wined3d_cs *cs)
 {
     struct wined3d_cs_packet *packet;
@@ -3322,12 +3333,7 @@ static void wined3d_cs_queue_submit(struct wined3d_cs_queue *queue, struct wined
     InterlockedExchange((LONG *)&queue->head, queue->head + packet_size);
 
     if (InterlockedCompareExchange(&cs->waiting_for_event, FALSE, TRUE))
-    {
-        if (pNtAlertThreadByThreadId)
-            pNtAlertThreadByThreadId((HANDLE)(ULONG_PTR)cs->thread_id);
-        else
-            SetEvent(cs->event);
-    }
+        wined3d_cs_wake(cs);
 }
 
 static void wined3d_cs_mt_submit(struct wined3d_device_context *context, enum wined3d_cs_queue_id queue_id)
@@ -3421,6 +3427,7 @@ static void wined3d_cs_mt_finish(struct wined3d_device_context *context, enum wi
         return wined3d_cs_st_finish(context, queue_id);
 
     TRACE_(d3d_perf)("Waiting for queue %u to be empty.\n", queue_id);
+    wined3d_cs_wake(cs);
     while (cs->queue[queue_id].head != *(volatile ULONG *)&cs->queue[queue_id].tail)
         wined3d_pause(&spin_count);
     TRACE_(d3d_perf)("Queue is now empty.\n");

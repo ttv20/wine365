@@ -3719,6 +3719,7 @@ static inline void wined3d_device_context_unlock(struct wined3d_device_context *
 struct wined3d_cs *wined3d_cs_create(struct wined3d_device *device,
         const enum wined3d_feature_level *levels, unsigned int level_count);
 void wined3d_cs_destroy(struct wined3d_cs *cs);
+void wined3d_cs_wake(const struct wined3d_cs *cs);
 void wined3d_cs_destroy_object(struct wined3d_cs *cs,
         void (*callback)(void *object), void *object);
 void wined3d_cs_emit_add_dirty_texture_region(struct wined3d_cs *cs,
@@ -3890,6 +3891,11 @@ static inline void wined3d_resource_wait_idle(const struct wined3d_resource *res
 
     if (!wined3d_ge_wrap(head, access_time))
         return;
+
+    /* The queue submission wake can race with the command stream entering its
+     * wait. Make sure a client which is about to wait for this resource does
+     * not spin forever while the command stream is asleep. */
+    wined3d_cs_wake(cs);
 
     for (;;)
     {

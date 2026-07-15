@@ -7,3 +7,4 @@
 8 stdcall REExtendedRegisterClass()
 9 stdcall RichEdit10ANSIWndProc(ptr long long long)
 10 stdcall RichEditANSIWndProc(ptr long long long)
+25 extern IID_ITextServices2

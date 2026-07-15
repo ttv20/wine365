@@ -1842,7 +1842,9 @@ static HRESULT WINAPI domdoc_setProperty(IXMLDOMDocument3 *iface, BSTR p, VARIAN
 
         domdoc_properties_clear_selection_namespaces(properties);
         SysFreeString(properties->namespaces.value);
-        properties->namespaces.value = SysAllocString(V_BSTR(&value));
+        properties->namespaces.value = SysAllocString(V_BSTR(&value) ? V_BSTR(&value) : L"");
+        if (!properties->namespaces.value)
+            return E_OUTOFMEMORY;
         return xpath_parse_selection_namespaces(properties->namespaces.value, properties);
     }
 

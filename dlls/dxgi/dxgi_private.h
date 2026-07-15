@@ -32,6 +32,7 @@
 
 #include "dxgi1_6.h"
 #include "d3d10_1.h"
+#include "d3d11.h"
 #include "d3d12.h"
 #ifdef DXGI_INIT_GUID
 #include "initguid.h"
@@ -179,6 +180,9 @@ struct d3d11_swapchain
     struct wined3d_swapchain_state_parent state_parent;
     IWineDXGIDevice *device;
     IWineDXGIFactory *factory;
+    ID3D11Texture2D *present1_shadow;
+    ID3D11Texture2D *present1_scratch;
+    BOOL present1_shadow_valid;
 
     IDXGIOutput *target;
     LONG present_count;

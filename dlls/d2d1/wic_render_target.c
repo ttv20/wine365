@@ -85,6 +85,55 @@ static HRESULT d2d_wic_render_target_present(IUnknown *outer_unknown)
 
     src = mapped_texture.pData;
 
+    /* Diagnose empty WordArt-style thumbs: count non-near-white BGRA samples. */
+    if (render_target->bpp == 4 && render_target->width && render_target->height)
+    {
+        unsigned int dark = 0, nonwhite = 0, x, y;
+        const BYTE *row = src;
+        for (y = 0; y < render_target->height; ++y)
+        {
+            for (x = 0; x < render_target->width; ++x)
+            {
+                const BYTE *p = row + x * 4;
+                /* BGRA */
+                if (p[0] < 240 || p[1] < 240 || p[2] < 240 || p[3] < 250)
+                    ++nonwhite;
+                if (p[0] < 80 && p[1] < 80 && p[2] < 80 && p[3] > 10)
+                    ++dark;
+            }
+            row += mapped_texture.RowPitch;
+        }
+        if (render_target->width <= 128 && render_target->height <= 128)
+        {
+            static unsigned int dump_count;
+            WARN("WIC present %ux%u nonwhite=%u dark=%u (WordArt gallery thumbs?).\n",
+                    render_target->width, render_target->height, nonwhite, dark);
+            /* Dump first few small thumbs as raw BGRA for offline PNG conversion. */
+            if (dump_count < 8 && nonwhite > 50)
+            {
+                char path[64];
+                HANDLE file;
+                DWORD written;
+                snprintf(path, sizeof(path), "C:\\users\\wine\\Temp\\wic-thumb-%u-%ux%u.bgra",
+                        dump_count, render_target->width, render_target->height);
+                file = CreateFileA(path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+                if (file != INVALID_HANDLE_VALUE)
+                {
+                    const BYTE *row = src;
+                    unsigned int y;
+                    for (y = 0; y < render_target->height; ++y)
+                    {
+                        WriteFile(file, row, render_target->width * 4, &written, NULL);
+                        row += mapped_texture.RowPitch;
+                    }
+                    CloseHandle(file);
+                    WARN("Dumped WIC thumb to %s nonwhite=%u dark=%u.\n", path, nonwhite, dark);
+                    ++dump_count;
+                }
+            }
+        }
+    }
+
     for (i = 0; i < render_target->height; ++i)
     {
         memcpy(dst, src, render_target->bpp * render_target->width);

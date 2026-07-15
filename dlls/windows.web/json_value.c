@@ -19,6 +19,8 @@
  */
 
 #include "private.h"
+#include <math.h>
+#include <stdint.h>
 #include "wine/debug.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(web);
@@ -219,8 +221,87 @@ static HRESULT WINAPI json_value_get_ValueType( IJsonValue *iface, JsonValueType
 
 static HRESULT WINAPI json_value_Stringify( IJsonValue *iface, HSTRING *value )
 {
-    FIXME( "iface %p, value %p stub!\n", iface, value );
-    return E_NOTIMPL;
+    static const WCHAR hex[] = L"0123456789abcdef";
+    struct json_value *impl = impl_from_IJsonValue( iface );
+    IJsonValue *container_value;
+    const WCHAR *input;
+    WCHAR number[32], *buffer, *dst;
+    UINT32 length, i;
+    HRESULT hr;
+
+    TRACE( "iface %p, value %p.\n", iface, value );
+
+    if (!value) return E_POINTER;
+    *value = NULL;
+
+    switch (impl->json_value_type)
+    {
+    case JsonValueType_Null:
+        return WindowsCreateString( L"null", 4, value );
+
+    case JsonValueType_Boolean:
+        return impl->boolean_value ? WindowsCreateString( L"true", 4, value )
+                                   : WindowsCreateString( L"false", 5, value );
+
+    case JsonValueType_Number:
+        if (!isfinite( impl->number_value )) return WEB_E_INVALID_JSON_NUMBER;
+        length = swprintf( number, ARRAY_SIZE(number), L"%.17g", impl->number_value );
+        return WindowsCreateString( number, length, value );
+
+    case JsonValueType_String:
+        input = WindowsGetStringRawBuffer( impl->string_value, &length );
+        if (length > (UINT32_MAX - 2) / 6) return E_OUTOFMEMORY;
+        if (!(buffer = malloc( (length * 6 + 2) * sizeof(*buffer) ))) return E_OUTOFMEMORY;
+
+        dst = buffer;
+        *dst++ = '"';
+        for (i = 0; i < length; ++i)
+        {
+            switch (input[i])
+            {
+            case '"': *dst++ = '\\'; *dst++ = '"'; break;
+            case '\\': *dst++ = '\\'; *dst++ = '\\'; break;
+            case '\b': *dst++ = '\\'; *dst++ = 'b'; break;
+            case '\f': *dst++ = '\\'; *dst++ = 'f'; break;
+            case '\n': *dst++ = '\\'; *dst++ = 'n'; break;
+            case '\r': *dst++ = '\\'; *dst++ = 'r'; break;
+            case '\t': *dst++ = '\\'; *dst++ = 't'; break;
+            default:
+                if (input[i] < 0x20)
+                {
+                    *dst++ = '\\';
+                    *dst++ = 'u';
+                    *dst++ = hex[(input[i] >> 12) & 0xf];
+                    *dst++ = hex[(input[i] >> 8) & 0xf];
+                    *dst++ = hex[(input[i] >> 4) & 0xf];
+                    *dst++ = hex[input[i] & 0xf];
+                }
+                else *dst++ = input[i];
+            }
+        }
+        *dst++ = '"';
+        hr = WindowsCreateString( buffer, dst - buffer, value );
+        free( buffer );
+        return hr;
+
+    case JsonValueType_Array:
+        if (FAILED(hr = IJsonArray_QueryInterface( impl->array_value, &IID_IJsonValue,
+                                                   (void **)&container_value )))
+            return hr;
+        hr = IJsonValue_Stringify( container_value, value );
+        IJsonValue_Release( container_value );
+        return hr;
+
+    case JsonValueType_Object:
+        if (FAILED(hr = IJsonObject_QueryInterface( impl->object_value, &IID_IJsonValue,
+                                                    (void **)&container_value )))
+            return hr;
+        hr = IJsonValue_Stringify( container_value, value );
+        IJsonValue_Release( container_value );
+        return hr;
+    }
+
+    return E_UNEXPECTED;
 }
 
 static HRESULT WINAPI json_value_GetString( IJsonValue *iface, HSTRING *value )
@@ -539,7 +620,7 @@ static HRESULT parse_json_value( struct json_buffer *json, IJsonValue **value )
     return hr;
 }
 
-static HRESULT parse_json( HSTRING string, IJsonValue **value )
+HRESULT json_value_parse( HSTRING string, IJsonValue **value )
 {
     HRESULT hr;
     struct json_buffer json;
@@ -559,7 +640,7 @@ static HRESULT WINAPI json_value_statics_Parse( IJsonValueStatics *iface, HSTRIN
     if (!value) return E_POINTER;
     if (!input) return WEB_E_INVALID_JSON_STRING;
 
-    if (SUCCEEDED(hr = parse_json( input, value )))
+    if (SUCCEEDED(hr = json_value_parse( input, value )))
         TRACE( "created IJsonValue %p.\n", *value );
 
     return hr;

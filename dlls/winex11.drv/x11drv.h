@@ -290,6 +290,10 @@ extern BOOL client_side_graphics;
 extern BOOL client_side_with_render;
 extern BOOL shape_layered_windows;
 extern const struct gdi_dc_funcs *X11DRV_XRender_Init(void);
+extern BOOL X11DRV_XRender_Composite( Drawable src, const XVisualInfo *src_visual,
+                                     Drawable dst, const XVisualInfo *dst_visual, HRGN clip,
+                                     int src_width, int src_height,
+                                     int dst_x, int dst_y, int dst_width, int dst_height );
 
 extern BOOL visual_from_pixel_format( int format, XVisualInfo *visual );
 
@@ -370,6 +374,7 @@ struct x11drv_client_surface
     struct client_surface client;
     XWindowChanges changes;
     Colormap colormap;
+    XVisualInfo visual;
     Window window;
     RECT rect;
 

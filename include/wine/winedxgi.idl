@@ -20,6 +20,18 @@
 
 import "dxgi1_6.idl";
 
+interface IWineDXGIResourceSharing;
+
+[
+    object,
+    local,
+    uuid(5fbd1c8e-6c8a-4af7-b7f3-860d83a5ec55)
+]
+interface IWineDXGIResourceSharing : IUnknown
+{
+    HRESULT get_shared_handle([out] HANDLE *handle);
+}
+
 [
     object,
     local,

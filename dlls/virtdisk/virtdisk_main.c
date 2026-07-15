@@ -30,7 +30,7 @@ DWORD WINAPI GetStorageDependencyInformation(HANDLE obj, GET_STORAGE_DEPENDENCY_
 {
     ULONG temp_size = sizeof(STORAGE_DEPENDENCY_INFO);
 
-    FIXME("(%p, 0x%x, %lu, %p, %p): stub\n", obj, flags, size, info, used);
+    FIXME("(%p, 0x%x, %lu, %p, %p): semi-stub\n", obj, flags, size, info, used);
 
     if (used) *used = temp_size;
 
@@ -40,9 +40,16 @@ DWORD WINAPI GetStorageDependencyInformation(HANDLE obj, GET_STORAGE_DEPENDENCY_
     if (size < temp_size)
         return ERROR_INSUFFICIENT_BUFFER;
 
+    /* Office opens ordinary document files and probes whether they live on a
+     * virtual disk. Returning success with empty dependency info led Word's
+     * open path to call VCRUNTIME140!wcsstr with an invalid haystack pointer
+     * (observed on native Wayland: AV read of 0xFFFFFFFFFFFFFFFF immediately
+     * after this stub). Real non-VHD file handles should fail as not-virtual.
+     */
+    info->Version = 0;
     info->NumberEntries = 0;
 
-    return ERROR_SUCCESS;
+    return ERROR_VIRTDISK_NOT_VIRTUAL_DISK;
 }
 
 DWORD WINAPI OpenVirtualDisk(VIRTUAL_STORAGE_TYPE *type, const WCHAR *path, VIRTUAL_DISK_ACCESS_MASK mask, OPEN_VIRTUAL_DISK_FLAG flags,

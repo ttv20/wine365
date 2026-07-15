@@ -72,6 +72,47 @@ static void d2d_rect_set(D2D1_RECT_F *dst, float left, float top, float right, f
     dst->bottom = bottom;
 }
 
+static BOOL d2d_device_context_atlas_draw_diag(const struct d2d_device_context *context)
+{
+    return GetEnvironmentVariableA("WINE_D2D_ATLAS_DRAW_DIAG", NULL, 0)
+            && context->pixel_size.width == 1536 && context->pixel_size.height == 1024;
+}
+
+static void d2d_device_context_atlas_log_rect(const struct d2d_device_context *context,
+        const char *operation, const D2D1_RECT_F *rect)
+{
+    const D2D1_MATRIX_3X2_F *m = &context->drawing_state.transform;
+    const D2D1_RECT_F *clip = context->clip_stack.count
+            ? &context->clip_stack.stack[context->clip_stack.count - 1] : NULL;
+
+    if (!d2d_device_context_atlas_draw_diag(context))
+        return;
+
+    if (rect && clip)
+        WARN("OFFICE_ATLAS %s context %p rect %.3f,%.3f-%.3f,%.3f "
+                "transform %.3f,%.3f,%.3f,%.3f,%.3f,%.3f clip %.3f,%.3f-%.3f,%.3f depth %Iu.\n",
+                operation, &context->ID2D1DeviceContext6_iface,
+                rect->left, rect->top, rect->right, rect->bottom,
+                m->_11, m->_12, m->_21, m->_22, m->_31, m->_32,
+                clip->left, clip->top, clip->right, clip->bottom, context->clip_stack.count);
+    else if (rect)
+        WARN("OFFICE_ATLAS %s context %p rect %.3f,%.3f-%.3f,%.3f "
+                "transform %.3f,%.3f,%.3f,%.3f,%.3f,%.3f no_clip.\n",
+                operation, &context->ID2D1DeviceContext6_iface,
+                rect->left, rect->top, rect->right, rect->bottom,
+                m->_11, m->_12, m->_21, m->_22, m->_31, m->_32);
+    else if (clip)
+        WARN("OFFICE_ATLAS %s context %p transform %.3f,%.3f,%.3f,%.3f,%.3f,%.3f "
+                "clip %.3f,%.3f-%.3f,%.3f depth %Iu.\n",
+                operation, &context->ID2D1DeviceContext6_iface,
+                m->_11, m->_12, m->_21, m->_22, m->_31, m->_32,
+                clip->left, clip->top, clip->right, clip->bottom, context->clip_stack.count);
+    else
+        WARN("OFFICE_ATLAS %s context %p transform %.3f,%.3f,%.3f,%.3f,%.3f,%.3f no_clip.\n",
+                operation, &context->ID2D1DeviceContext6_iface,
+                m->_11, m->_12, m->_21, m->_22, m->_31, m->_32);
+}
+
 static void d2d_size_set(D2D1_SIZE_U *dst, float width, float height)
 {
     dst->width = width;
@@ -367,6 +408,10 @@ static HRESULT STDMETHODCALLTYPE d2d_device_context_CreateBitmap(ID2D1DeviceCont
 
     TRACE("iface %p, size {%u, %u}, src_data %p, pitch %u, desc %p, bitmap %p.\n",
             iface, size.width, size.height, src_data, pitch, desc, bitmap);
+    if (GetEnvironmentVariableA("WINE_D2D_TARGET_DIAG", NULL, 0))
+        WARN("OFFICE_D2D CreateBitmap context %p size %ux%u format %#x alpha %#x options %#x.\n",
+                iface, size.width, size.height, desc ? desc->pixelFormat.format : 0,
+                desc ? desc->pixelFormat.alphaMode : 0, 0u);
 
     if (desc)
     {
@@ -657,6 +702,8 @@ static void STDMETHODCALLTYPE d2d_device_context_FillRectangle(ID2D1DeviceContex
     HRESULT hr;
 
     TRACE("iface %p, rect %s, brush %p.\n", iface, debug_d2d_rect_f(rect), brush);
+
+    d2d_device_context_atlas_log_rect(context, "FillRectangle", rect);
 
     if (FAILED(context->error.code))
         return;
@@ -1253,6 +1300,8 @@ static void STDMETHODCALLTYPE d2d_device_context_DrawBitmap(ID2D1DeviceContext6 
     TRACE("iface %p, bitmap %p, dst_rect %s, opacity %.8e, interpolation_mode %#x, src_rect %s.\n",
             iface, bitmap, debug_d2d_rect_f(dst_rect), opacity, interpolation_mode, debug_d2d_rect_f(src_rect));
 
+    d2d_device_context_atlas_log_rect(context, "DrawBitmap", dst_rect);
+
     if (FAILED(context->error.code))
         return;
 
@@ -1568,6 +1617,7 @@ static void d2d_device_context_draw_glyph_run_bitmap(struct d2d_device_context *
         goto done;
     }
 
+    /* Draw in device space: analysis bounds already include the world transform. */
     transform = &context->drawing_state.transform;
     m = *transform;
     *transform = identity;
@@ -1709,6 +1759,10 @@ static void STDMETHODCALLTYPE d2d_device_context_DrawGlyphRun(ID2D1DeviceContext
     TRACE("iface %p, baseline_origin %s, glyph_run %p, brush %p, measuring_mode %#x.\n",
             iface, debug_d2d_point_2f(&baseline_origin), glyph_run, brush, measuring_mode);
 
+    if (d2d_device_context_atlas_draw_diag(context))
+        WARN("OFFICE_ATLAS DrawGlyphRun context %p baseline %.3f,%.3f glyphs %u.\n",
+                iface, baseline_origin.x, baseline_origin.y, glyph_run ? glyph_run->glyphCount : 0);
+
     d2d_device_context_draw_glyph_run(context, baseline_origin, glyph_run, NULL, brush, measuring_mode);
 }
 
@@ -1723,6 +1777,7 @@ static void STDMETHODCALLTYPE d2d_device_context_SetTransform(ID2D1DeviceContext
         d2d_command_list_set_transform(context->target.command_list, transform);
 
     context->drawing_state.transform = *transform;
+    d2d_device_context_atlas_log_rect(context, "SetTransform", NULL);
 }
 
 static void STDMETHODCALLTYPE d2d_device_context_GetTransform(ID2D1DeviceContext6 *iface,
@@ -1950,6 +2005,7 @@ static void STDMETHODCALLTYPE d2d_device_context_PushAxisAlignedClip(ID2D1Device
 
     if (!d2d_clip_stack_push(&context->clip_stack, &transformed_rect))
         WARN("Failed to push clip rect.\n");
+    d2d_device_context_atlas_log_rect(context, "PushClip", &transformed_rect);
 }
 
 static void STDMETHODCALLTYPE d2d_device_context_PopAxisAlignedClip(ID2D1DeviceContext6 *iface)
@@ -1961,6 +2017,7 @@ static void STDMETHODCALLTYPE d2d_device_context_PopAxisAlignedClip(ID2D1DeviceC
     if (context->target.type == D2D_TARGET_COMMAND_LIST)
         d2d_command_list_pop_clip(context->target.command_list);
 
+    d2d_device_context_atlas_log_rect(context, "PopClipBefore", NULL);
     d2d_clip_stack_pop(&context->clip_stack);
 }
 
@@ -1975,6 +2032,8 @@ static void STDMETHODCALLTYPE d2d_device_context_Clear(ID2D1DeviceContext6 *ifac
     HRESULT hr;
 
     TRACE("iface %p, colour %p.\n", iface, colour);
+
+    d2d_device_context_atlas_log_rect(context, "Clear", NULL);
 
     if (FAILED(context->error.code))
         return;
@@ -2056,6 +2115,8 @@ static void STDMETHODCALLTYPE d2d_device_context_BeginDraw(ID2D1DeviceContext6 *
 
     TRACE("iface %p.\n", iface);
 
+    d2d_device_context_atlas_log_rect(context, "BeginDraw", NULL);
+
     if (context->target.type == D2D_TARGET_COMMAND_LIST)
         d2d_command_list_begin_draw(context->target.command_list, context);
 
@@ -2087,6 +2148,7 @@ static HRESULT STDMETHODCALLTYPE d2d_device_context_EndDraw(ID2D1DeviceContext6 
             context->error.code = hr;
     }
 
+    d2d_device_context_atlas_log_rect(context, "EndDraw", NULL);
     return context->error.code;
 }
 
@@ -2268,12 +2330,23 @@ static HRESULT STDMETHODCALLTYPE d2d_device_context_CreateBitmapFromDxgiSurface(
         IDXGISurface *surface, const D2D1_BITMAP_PROPERTIES1 *desc, ID2D1Bitmap1 **bitmap)
 {
     struct d2d_device_context *context = impl_from_ID2D1DeviceContext(iface);
+    DXGI_SURFACE_DESC surface_desc = {0};
     D2D1_BITMAP_PROPERTIES1 bitmap_desc;
     unsigned int surface_options;
     struct d2d_bitmap *object;
     HRESULT hr;
 
     TRACE("iface %p, surface %p, desc %p, bitmap %p.\n", iface, surface, desc, bitmap);
+
+    if (GetEnvironmentVariableA("WINE_D2D_TARGET_DIAG", NULL, 0))
+    {
+        IDXGISurface_GetDesc(surface, &surface_desc);
+        WARN("OFFICE_D2D CreateBitmapFromDxgiSurface context %p surface %p size %ux%u "
+                "format %#x options %#x alpha %#x.\n", iface, surface,
+                surface_desc.Width, surface_desc.Height, surface_desc.Format,
+                desc ? desc->bitmapOptions : ~0u,
+                desc ? desc->pixelFormat.alphaMode : ~0u);
+    }
 
     surface_options = d2d_get_bitmap_options_for_surface(surface);
 
@@ -2570,6 +2643,8 @@ static void STDMETHODCALLTYPE d2d_device_context_SetTarget(ID2D1DeviceContext6 *
 
     if (!target)
     {
+        if (GetEnvironmentVariableA("WINE_D2D_TARGET_DIAG", NULL, 0))
+            WARN("OFFICE_D2D SetTarget context %p target NULL.\n", iface);
         d2d_device_context_reset_target(context);
         return;
     }
@@ -2577,6 +2652,11 @@ static void STDMETHODCALLTYPE d2d_device_context_SetTarget(ID2D1DeviceContext6 *
     if (SUCCEEDED(ID2D1Image_QueryInterface(target, &IID_ID2D1Bitmap, (void **)&bitmap)))
     {
         bitmap_impl = unsafe_impl_from_ID2D1Bitmap(bitmap);
+
+        if (GetEnvironmentVariableA("WINE_D2D_TARGET_DIAG", NULL, 0))
+            WARN("OFFICE_D2D SetTarget context %p bitmap %p size %ux%u format %#x alpha %#x options %#x.\n",
+                    iface, bitmap_impl, bitmap_impl->pixel_size.width, bitmap_impl->pixel_size.height,
+                    bitmap_impl->format.format, bitmap_impl->format.alphaMode, bitmap_impl->options);
 
         if (!(bitmap_impl->options & D2D1_BITMAP_OPTIONS_TARGET))
         {
@@ -2723,6 +2803,8 @@ static void STDMETHODCALLTYPE d2d_device_context_DrawImage(ID2D1DeviceContext6 *
     TRACE("iface %p, image %p, target_offset %s, image_rect %s, interpolation_mode %#x, composite_mode %#x.\n",
             iface, image, debug_d2d_point_2f(target_offset), debug_d2d_rect_f(image_rect),
             interpolation_mode, composite_mode);
+
+    d2d_device_context_atlas_log_rect(context, "DrawImageSource", image_rect);
 
     if (FAILED(context->error.code))
         return;
@@ -3124,13 +3206,728 @@ static HRESULT STDMETHODCALLTYPE d2d_device_context_GetSvgGlyphImage(ID2D1Device
     return E_NOTIMPL;
 }
 
+typedef struct ID2D1SvgElement ID2D1SvgElement;
+
+static const GUID IID_ID2D1SvgDocument_local =
+        {0x86b88e4d, 0xafa4, 0x4d7b, {0x88, 0xe4, 0x68, 0xa5, 0x1c, 0x4a, 0x0a, 0xec}};
+static const GUID IID_ID2D1SvgElement_local =
+        {0xac7b67a6, 0x183e, 0x49c1, {0xa8, 0x23, 0x0e, 0xbe, 0x40, 0xb0, 0xdb, 0x29}};
+
+struct d2d_svg_document;
+
+struct d2d_svg_element_vtbl
+{
+    HRESULT (STDMETHODCALLTYPE *QueryInterface)(ID2D1SvgElement *iface, REFIID iid, void **out);
+    ULONG (STDMETHODCALLTYPE *AddRef)(ID2D1SvgElement *iface);
+    ULONG (STDMETHODCALLTYPE *Release)(ID2D1SvgElement *iface);
+    void (STDMETHODCALLTYPE *GetFactory)(ID2D1SvgElement *iface, ID2D1Factory **factory);
+    void (STDMETHODCALLTYPE *GetDocument)(ID2D1SvgElement *iface, ID2D1SvgDocument **document);
+    HRESULT (STDMETHODCALLTYPE *GetTagName)(ID2D1SvgElement *iface, WCHAR *name, UINT32 name_count);
+    UINT32 (STDMETHODCALLTYPE *GetTagNameLength)(ID2D1SvgElement *iface);
+    BOOL (STDMETHODCALLTYPE *IsTextContent)(ID2D1SvgElement *iface);
+    void (STDMETHODCALLTYPE *GetParent)(ID2D1SvgElement *iface, ID2D1SvgElement **parent);
+    BOOL (STDMETHODCALLTYPE *HasChildren)(ID2D1SvgElement *iface);
+    void (STDMETHODCALLTYPE *GetFirstChild)(ID2D1SvgElement *iface, ID2D1SvgElement **child);
+    void (STDMETHODCALLTYPE *GetLastChild)(ID2D1SvgElement *iface, ID2D1SvgElement **child);
+    HRESULT (STDMETHODCALLTYPE *GetPreviousChild)(ID2D1SvgElement *iface,
+            ID2D1SvgElement *reference_child, ID2D1SvgElement **previous_child);
+    HRESULT (STDMETHODCALLTYPE *GetNextChild)(ID2D1SvgElement *iface,
+            ID2D1SvgElement *reference_child, ID2D1SvgElement **next_child);
+    HRESULT (STDMETHODCALLTYPE *InsertChildBefore)(ID2D1SvgElement *iface,
+            ID2D1SvgElement *new_child, ID2D1SvgElement *reference_child);
+    HRESULT (STDMETHODCALLTYPE *AppendChild)(ID2D1SvgElement *iface, ID2D1SvgElement *new_child);
+    HRESULT (STDMETHODCALLTYPE *ReplaceChild)(ID2D1SvgElement *iface,
+            ID2D1SvgElement *new_child, ID2D1SvgElement *old_child);
+    HRESULT (STDMETHODCALLTYPE *RemoveChild)(ID2D1SvgElement *iface, ID2D1SvgElement *old_child);
+    HRESULT (STDMETHODCALLTYPE *CreateChild)(ID2D1SvgElement *iface,
+            const WCHAR *tag_name, ID2D1SvgElement **new_child);
+    BOOL (STDMETHODCALLTYPE *IsAttributeSpecified)(ID2D1SvgElement *iface,
+            const WCHAR *name, BOOL *inherited);
+    UINT32 (STDMETHODCALLTYPE *GetSpecifiedAttributeCount)(ID2D1SvgElement *iface);
+    HRESULT (STDMETHODCALLTYPE *GetSpecifiedAttributeName)(ID2D1SvgElement *iface,
+            UINT32 index, WCHAR *name, UINT32 name_count, BOOL *inherited);
+    HRESULT (STDMETHODCALLTYPE *GetSpecifiedAttributeNameLength)(ID2D1SvgElement *iface,
+            UINT32 index, UINT32 *name_length, BOOL *inherited);
+    HRESULT (STDMETHODCALLTYPE *RemoveAttribute)(ID2D1SvgElement *iface, const WCHAR *name);
+    HRESULT (STDMETHODCALLTYPE *SetTextValue)(ID2D1SvgElement *iface,
+            const WCHAR *name, UINT32 name_count);
+    HRESULT (STDMETHODCALLTYPE *GetTextValue)(ID2D1SvgElement *iface, WCHAR *name, UINT32 name_count);
+    UINT32 (STDMETHODCALLTYPE *GetTextValueLength)(ID2D1SvgElement *iface);
+    HRESULT (STDMETHODCALLTYPE *SetAttributeValueString)(ID2D1SvgElement *iface,
+            const WCHAR *name, UINT type, const WCHAR *value);
+    HRESULT (STDMETHODCALLTYPE *GetAttributeValueString)(ID2D1SvgElement *iface,
+            const WCHAR *name, UINT type, WCHAR *value, UINT32 value_count);
+    HRESULT (STDMETHODCALLTYPE *GetAttributeValueLength)(ID2D1SvgElement *iface,
+            const WCHAR *name, UINT type, UINT32 *value_length);
+    HRESULT (STDMETHODCALLTYPE *SetAttributeValuePod)(ID2D1SvgElement *iface,
+            const WCHAR *name, UINT type, const void *value, UINT32 value_size);
+    HRESULT (STDMETHODCALLTYPE *GetAttributeValuePod)(ID2D1SvgElement *iface,
+            const WCHAR *name, UINT type, void *value, UINT32 value_size);
+    HRESULT (STDMETHODCALLTYPE *SetAttributeValueObject)(ID2D1SvgElement *iface,
+            const WCHAR *name, void *value);
+    HRESULT (STDMETHODCALLTYPE *GetAttributeValueObject)(ID2D1SvgElement *iface,
+            const WCHAR *name, REFIID iid, void **value);
+};
+
+struct d2d_svg_element_iface
+{
+    const struct d2d_svg_element_vtbl *lpVtbl;
+};
+
+struct d2d_svg_document_vtbl
+{
+    HRESULT (STDMETHODCALLTYPE *QueryInterface)(ID2D1SvgDocument *iface, REFIID iid, void **out);
+    ULONG (STDMETHODCALLTYPE *AddRef)(ID2D1SvgDocument *iface);
+    ULONG (STDMETHODCALLTYPE *Release)(ID2D1SvgDocument *iface);
+    void (STDMETHODCALLTYPE *GetFactory)(ID2D1SvgDocument *iface, ID2D1Factory **factory);
+    HRESULT (STDMETHODCALLTYPE *SetViewportSize)(ID2D1SvgDocument *iface, D2D1_SIZE_F viewport_size);
+    D2D1_SIZE_F * (STDMETHODCALLTYPE *GetViewportSize)(ID2D1SvgDocument *iface, D2D1_SIZE_F *viewport_size);
+    HRESULT (STDMETHODCALLTYPE *SetRoot)(ID2D1SvgDocument *iface, void *root);
+    void (STDMETHODCALLTYPE *GetRoot)(ID2D1SvgDocument *iface, void **root);
+    HRESULT (STDMETHODCALLTYPE *FindElementById)(ID2D1SvgDocument *iface, const WCHAR *id, void **element);
+    HRESULT (STDMETHODCALLTYPE *Serialize)(ID2D1SvgDocument *iface, IStream *stream, void *subtree);
+    HRESULT (STDMETHODCALLTYPE *Deserialize)(ID2D1SvgDocument *iface, IStream *stream, void **subtree);
+    HRESULT (STDMETHODCALLTYPE *CreatePaint)(ID2D1SvgDocument *iface, UINT type, const D2D1_COLOR_F *color,
+            const WCHAR *id, void **paint);
+    HRESULT (STDMETHODCALLTYPE *CreateStrokeDashArray)(ID2D1SvgDocument *iface, const void *dashes,
+            UINT32 dash_count, void **array);
+    HRESULT (STDMETHODCALLTYPE *CreatePointCollection)(ID2D1SvgDocument *iface, const D2D1_POINT_2F *points,
+            UINT32 point_count, void **collection);
+    HRESULT (STDMETHODCALLTYPE *CreatePathData)(ID2D1SvgDocument *iface, const FLOAT *segment_data,
+            UINT32 segment_count, const UINT *commands, UINT32 command_count, void **path_data);
+};
+
+struct d2d_svg_document_iface
+{
+    const struct d2d_svg_document_vtbl *lpVtbl;
+};
+
+struct d2d_svg_element
+{
+    struct d2d_svg_element_iface ID2D1SvgElement_iface;
+    struct d2d_svg_document *document;
+    struct d2d_svg_element *allocation_next;
+    struct d2d_svg_element *parent;
+    struct d2d_svg_element *previous;
+    struct d2d_svg_element *next;
+    struct d2d_svg_element *first_child;
+    struct d2d_svg_element *last_child;
+    WCHAR tag_name[32];
+};
+
+struct d2d_svg_document
+{
+    struct d2d_svg_document_iface ID2D1SvgDocument_iface;
+    struct d2d_svg_element root;
+    struct d2d_svg_element *elements;
+    LONG refcount;
+    ID2D1Factory *factory;
+    D2D1_SIZE_F viewport_size;
+};
+
+static ULONG STDMETHODCALLTYPE d2d_svg_document_AddRef(ID2D1SvgDocument *iface);
+static ULONG STDMETHODCALLTYPE d2d_svg_document_Release(ID2D1SvgDocument *iface);
+static const struct d2d_svg_element_vtbl d2d_svg_element_vtbl;
+
+static inline struct d2d_svg_document *impl_from_ID2D1SvgDocument(ID2D1SvgDocument *iface)
+{
+    return CONTAINING_RECORD(iface, struct d2d_svg_document, ID2D1SvgDocument_iface);
+}
+
+static inline struct d2d_svg_element *impl_from_ID2D1SvgElement(ID2D1SvgElement *iface)
+{
+    return CONTAINING_RECORD(iface, struct d2d_svg_element, ID2D1SvgElement_iface);
+}
+
+static HRESULT STDMETHODCALLTYPE d2d_svg_element_QueryInterface(ID2D1SvgElement *iface, REFIID iid, void **out)
+{
+    TRACE("iface %p, iid %s, out %p.\n", iface, debugstr_guid(iid), out);
+
+    if (!out)
+        return E_INVALIDARG;
+    if (IsEqualGUID(iid, &IID_ID2D1SvgElement_local) || IsEqualGUID(iid, &IID_ID2D1Resource)
+            || IsEqualGUID(iid, &IID_IUnknown))
+    {
+        d2d_svg_document_AddRef((ID2D1SvgDocument *)&impl_from_ID2D1SvgElement(iface)->document->ID2D1SvgDocument_iface);
+        *out = iface;
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+
+static ULONG STDMETHODCALLTYPE d2d_svg_element_AddRef(ID2D1SvgElement *iface)
+{
+    struct d2d_svg_document *document = impl_from_ID2D1SvgElement(iface)->document;
+
+    return d2d_svg_document_AddRef((ID2D1SvgDocument *)&document->ID2D1SvgDocument_iface);
+}
+
+static ULONG STDMETHODCALLTYPE d2d_svg_element_Release(ID2D1SvgElement *iface)
+{
+    struct d2d_svg_document *document = impl_from_ID2D1SvgElement(iface)->document;
+
+    return d2d_svg_document_Release((ID2D1SvgDocument *)&document->ID2D1SvgDocument_iface);
+}
+
+static void STDMETHODCALLTYPE d2d_svg_element_GetFactory(ID2D1SvgElement *iface, ID2D1Factory **factory)
+{
+    struct d2d_svg_document *document = impl_from_ID2D1SvgElement(iface)->document;
+
+    TRACE("iface %p, factory %p.\n", iface, factory);
+    ID2D1Factory_AddRef(document->factory);
+    *factory = document->factory;
+}
+
+static void STDMETHODCALLTYPE d2d_svg_element_GetDocument(ID2D1SvgElement *iface, ID2D1SvgDocument **out)
+{
+    struct d2d_svg_document *document = impl_from_ID2D1SvgElement(iface)->document;
+
+    FIXME("iface %p, document %p semi-stub!\n", iface, out);
+    d2d_svg_document_AddRef((ID2D1SvgDocument *)&document->ID2D1SvgDocument_iface);
+    *out = (ID2D1SvgDocument *)&document->ID2D1SvgDocument_iface;
+}
+
+static HRESULT STDMETHODCALLTYPE d2d_svg_element_GetTagName(ID2D1SvgElement *iface, WCHAR *name, UINT32 count)
+{
+    struct d2d_svg_element *element = impl_from_ID2D1SvgElement(iface);
+    UINT32 length = wcslen(element->tag_name);
+
+    FIXME("iface %p, name %p, count %u semi-stub!\n", iface, name, count);
+    if (!name || count <= length)
+        return E_INVALIDARG;
+    memcpy(name, element->tag_name, (length + 1) * sizeof(*name));
+    return S_OK;
+}
+
+static UINT32 STDMETHODCALLTYPE d2d_svg_element_GetTagNameLength(ID2D1SvgElement *iface)
+{
+    struct d2d_svg_element *element = impl_from_ID2D1SvgElement(iface);
+
+    FIXME("iface %p semi-stub!\n", iface);
+    return wcslen(element->tag_name);
+}
+
+static BOOL STDMETHODCALLTYPE d2d_svg_element_IsTextContent(ID2D1SvgElement *iface)
+{
+    FIXME("iface %p semi-stub!\n", iface);
+    return FALSE;
+}
+
+static void STDMETHODCALLTYPE d2d_svg_element_GetParent(ID2D1SvgElement *iface, ID2D1SvgElement **parent)
+{
+    struct d2d_svg_element *element = impl_from_ID2D1SvgElement(iface);
+
+    FIXME("iface %p, parent %p semi-stub!\n", iface, parent);
+    *parent = NULL;
+    if (element->parent)
+    {
+        d2d_svg_element_AddRef((ID2D1SvgElement *)&element->parent->ID2D1SvgElement_iface);
+        *parent = (ID2D1SvgElement *)&element->parent->ID2D1SvgElement_iface;
+    }
+}
+
+static BOOL STDMETHODCALLTYPE d2d_svg_element_HasChildren(ID2D1SvgElement *iface)
+{
+    struct d2d_svg_element *element = impl_from_ID2D1SvgElement(iface);
+
+    FIXME("iface %p semi-stub!\n", iface);
+    return !!element->first_child;
+}
+
+static void STDMETHODCALLTYPE d2d_svg_element_GetFirstChild(ID2D1SvgElement *iface, ID2D1SvgElement **child)
+{
+    struct d2d_svg_element *element = impl_from_ID2D1SvgElement(iface);
+
+    FIXME("iface %p, child %p semi-stub!\n", iface, child);
+    *child = NULL;
+    if (element->first_child)
+    {
+        d2d_svg_element_AddRef((ID2D1SvgElement *)&element->first_child->ID2D1SvgElement_iface);
+        *child = (ID2D1SvgElement *)&element->first_child->ID2D1SvgElement_iface;
+    }
+}
+
+static void STDMETHODCALLTYPE d2d_svg_element_GetLastChild(ID2D1SvgElement *iface, ID2D1SvgElement **child)
+{
+    struct d2d_svg_element *element = impl_from_ID2D1SvgElement(iface);
+
+    FIXME("iface %p, child %p semi-stub!\n", iface, child);
+    *child = NULL;
+    if (element->last_child)
+    {
+        d2d_svg_element_AddRef((ID2D1SvgElement *)&element->last_child->ID2D1SvgElement_iface);
+        *child = (ID2D1SvgElement *)&element->last_child->ID2D1SvgElement_iface;
+    }
+}
+
+static HRESULT STDMETHODCALLTYPE d2d_svg_element_GetPreviousChild(ID2D1SvgElement *iface,
+        ID2D1SvgElement *reference_child, ID2D1SvgElement **previous_child)
+{
+    FIXME("iface %p, reference_child %p, previous_child %p stub!\n", iface, reference_child, previous_child);
+    if (previous_child)
+        *previous_child = NULL;
+    return E_NOTIMPL;
+}
+
+static HRESULT STDMETHODCALLTYPE d2d_svg_element_GetNextChild(ID2D1SvgElement *iface,
+        ID2D1SvgElement *reference_child, ID2D1SvgElement **next_child)
+{
+    FIXME("iface %p, reference_child %p, next_child %p stub!\n", iface, reference_child, next_child);
+    if (next_child)
+        *next_child = NULL;
+    return E_NOTIMPL;
+}
+
+static HRESULT STDMETHODCALLTYPE d2d_svg_element_InsertChildBefore(ID2D1SvgElement *iface,
+        ID2D1SvgElement *new_child, ID2D1SvgElement *reference_child)
+{
+    FIXME("iface %p, new_child %p, reference_child %p stub!\n", iface, new_child, reference_child);
+    return E_NOTIMPL;
+}
+
+static HRESULT STDMETHODCALLTYPE d2d_svg_element_AppendChild(ID2D1SvgElement *iface, ID2D1SvgElement *new_child)
+{
+    struct d2d_svg_element *element = impl_from_ID2D1SvgElement(iface);
+    struct d2d_svg_element *child;
+
+    FIXME("iface %p, new_child %p semi-stub!\n", iface, new_child);
+    if (!new_child)
+        return E_INVALIDARG;
+    child = impl_from_ID2D1SvgElement(new_child);
+    if (child->document != element->document || child == element || child->parent)
+        return E_INVALIDARG;
+    child->parent = element;
+    child->previous = element->last_child;
+    if (element->last_child)
+        element->last_child->next = child;
+    else
+        element->first_child = child;
+    element->last_child = child;
+    return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE d2d_svg_element_ReplaceChild(ID2D1SvgElement *iface,
+        ID2D1SvgElement *new_child, ID2D1SvgElement *old_child)
+{
+    FIXME("iface %p, new_child %p, old_child %p stub!\n", iface, new_child, old_child);
+    return E_NOTIMPL;
+}
+
+static HRESULT STDMETHODCALLTYPE d2d_svg_element_RemoveChild(ID2D1SvgElement *iface, ID2D1SvgElement *old_child)
+{
+    FIXME("iface %p, old_child %p stub!\n", iface, old_child);
+    return E_NOTIMPL;
+}
+
+static HRESULT STDMETHODCALLTYPE d2d_svg_element_CreateChild(ID2D1SvgElement *iface,
+        const WCHAR *tag_name, ID2D1SvgElement **new_child)
+{
+    struct d2d_svg_document *document = impl_from_ID2D1SvgElement(iface)->document;
+    struct d2d_svg_element *child;
+    size_t length;
+
+    FIXME("iface %p, tag_name %s, new_child %p semi-stub!\n", iface, debugstr_w(tag_name), new_child);
+    if (!tag_name || !new_child)
+        return E_INVALIDARG;
+    *new_child = NULL;
+    if (!(length = wcslen(tag_name)) || length >= ARRAY_SIZE(child->tag_name))
+        return E_INVALIDARG;
+    if (!(child = calloc(1, sizeof(*child))))
+        return E_OUTOFMEMORY;
+    child->ID2D1SvgElement_iface.lpVtbl = &d2d_svg_element_vtbl;
+    child->document = document;
+    memcpy(child->tag_name, tag_name, (length + 1) * sizeof(*tag_name));
+    child->allocation_next = document->elements;
+    document->elements = child;
+    d2d_svg_element_AddRef((ID2D1SvgElement *)&child->ID2D1SvgElement_iface);
+    *new_child = (ID2D1SvgElement *)&child->ID2D1SvgElement_iface;
+    return S_OK;
+}
+
+static BOOL STDMETHODCALLTYPE d2d_svg_element_IsAttributeSpecified(ID2D1SvgElement *iface,
+        const WCHAR *name, BOOL *inherited)
+{
+    FIXME("iface %p, name %s, inherited %p semi-stub!\n", iface, debugstr_w(name), inherited);
+    if (inherited)
+        *inherited = FALSE;
+    return FALSE;
+}
+
+static UINT32 STDMETHODCALLTYPE d2d_svg_element_GetSpecifiedAttributeCount(ID2D1SvgElement *iface)
+{
+    FIXME("iface %p semi-stub!\n", iface);
+    return 0;
+}
+
+static HRESULT STDMETHODCALLTYPE d2d_svg_element_GetSpecifiedAttributeName(ID2D1SvgElement *iface,
+        UINT32 index, WCHAR *name, UINT32 name_count, BOOL *inherited)
+{
+    FIXME("iface %p, index %u, name %p, name_count %u, inherited %p stub!\n",
+            iface, index, name, name_count, inherited);
+    if (name && name_count)
+        *name = 0;
+    if (inherited)
+        *inherited = FALSE;
+    return E_INVALIDARG;
+}
+
+static HRESULT STDMETHODCALLTYPE d2d_svg_element_GetSpecifiedAttributeNameLength(ID2D1SvgElement *iface,
+        UINT32 index, UINT32 *name_length, BOOL *inherited)
+{
+    FIXME("iface %p, index %u, name_length %p, inherited %p stub!\n", iface, index, name_length, inherited);
+    if (name_length)
+        *name_length = 0;
+    if (inherited)
+        *inherited = FALSE;
+    return E_INVALIDARG;
+}
+
+static HRESULT STDMETHODCALLTYPE d2d_svg_element_RemoveAttribute(ID2D1SvgElement *iface, const WCHAR *name)
+{
+    FIXME("iface %p, name %s stub!\n", iface, debugstr_w(name));
+    return E_NOTIMPL;
+}
+
+static HRESULT STDMETHODCALLTYPE d2d_svg_element_SetTextValue(ID2D1SvgElement *iface,
+        const WCHAR *value, UINT32 value_count)
+{
+    FIXME("iface %p, value %p, value_count %u stub!\n", iface, value, value_count);
+    return E_NOTIMPL;
+}
+
+static HRESULT STDMETHODCALLTYPE d2d_svg_element_GetTextValue(ID2D1SvgElement *iface,
+        WCHAR *value, UINT32 value_count)
+{
+    FIXME("iface %p, value %p, value_count %u stub!\n", iface, value, value_count);
+    if (value && value_count)
+        *value = 0;
+    return E_NOTIMPL;
+}
+
+static UINT32 STDMETHODCALLTYPE d2d_svg_element_GetTextValueLength(ID2D1SvgElement *iface)
+{
+    FIXME("iface %p semi-stub!\n", iface);
+    return 0;
+}
+
+static HRESULT STDMETHODCALLTYPE d2d_svg_element_SetAttributeValueString(ID2D1SvgElement *iface,
+        const WCHAR *name, UINT type, const WCHAR *value)
+{
+    FIXME("iface %p, name %s, type %u, value %s stub!\n", iface, debugstr_w(name), type, debugstr_w(value));
+    return E_NOTIMPL;
+}
+
+static HRESULT STDMETHODCALLTYPE d2d_svg_element_GetAttributeValueString(ID2D1SvgElement *iface,
+        const WCHAR *name, UINT type, WCHAR *value, UINT32 value_count)
+{
+    FIXME("iface %p, name %s, type %u, value %p, value_count %u stub!\n",
+            iface, debugstr_w(name), type, value, value_count);
+    if (value && value_count)
+        *value = 0;
+    return E_NOTIMPL;
+}
+
+static HRESULT STDMETHODCALLTYPE d2d_svg_element_GetAttributeValueLength(ID2D1SvgElement *iface,
+        const WCHAR *name, UINT type, UINT32 *value_length)
+{
+    FIXME("iface %p, name %s, type %u, value_length %p stub!\n", iface, debugstr_w(name), type, value_length);
+    if (value_length)
+        *value_length = 0;
+    return E_NOTIMPL;
+}
+
+static HRESULT STDMETHODCALLTYPE d2d_svg_element_SetAttributeValuePod(ID2D1SvgElement *iface,
+        const WCHAR *name, UINT type, const void *value, UINT32 value_size)
+{
+    FIXME("iface %p, name %s, type %u, value %p, value_size %u stub!\n",
+            iface, debugstr_w(name), type, value, value_size);
+    return E_NOTIMPL;
+}
+
+static HRESULT STDMETHODCALLTYPE d2d_svg_element_GetAttributeValuePod(ID2D1SvgElement *iface,
+        const WCHAR *name, UINT type, void *value, UINT32 value_size)
+{
+    FIXME("iface %p, name %s, type %u, value %p, value_size %u stub!\n",
+            iface, debugstr_w(name), type, value, value_size);
+    if (value)
+        memset(value, 0, value_size);
+    return E_NOTIMPL;
+}
+
+static HRESULT STDMETHODCALLTYPE d2d_svg_element_SetAttributeValueObject(ID2D1SvgElement *iface,
+        const WCHAR *name, void *value)
+{
+    FIXME("iface %p, name %s, value %p stub!\n", iface, debugstr_w(name), value);
+    return E_NOTIMPL;
+}
+
+static HRESULT STDMETHODCALLTYPE d2d_svg_element_GetAttributeValueObject(ID2D1SvgElement *iface,
+        const WCHAR *name, REFIID iid, void **value)
+{
+    FIXME("iface %p, name %s, iid %s, value %p stub!\n", iface, debugstr_w(name), debugstr_guid(iid), value);
+    if (value)
+        *value = NULL;
+    return E_NOTIMPL;
+}
+
+static const struct d2d_svg_element_vtbl d2d_svg_element_vtbl =
+{
+    d2d_svg_element_QueryInterface,
+    d2d_svg_element_AddRef,
+    d2d_svg_element_Release,
+    d2d_svg_element_GetFactory,
+    d2d_svg_element_GetDocument,
+    d2d_svg_element_GetTagName,
+    d2d_svg_element_GetTagNameLength,
+    d2d_svg_element_IsTextContent,
+    d2d_svg_element_GetParent,
+    d2d_svg_element_HasChildren,
+    d2d_svg_element_GetFirstChild,
+    d2d_svg_element_GetLastChild,
+    d2d_svg_element_GetPreviousChild,
+    d2d_svg_element_GetNextChild,
+    d2d_svg_element_InsertChildBefore,
+    d2d_svg_element_AppendChild,
+    d2d_svg_element_ReplaceChild,
+    d2d_svg_element_RemoveChild,
+    d2d_svg_element_CreateChild,
+    d2d_svg_element_IsAttributeSpecified,
+    d2d_svg_element_GetSpecifiedAttributeCount,
+    d2d_svg_element_GetSpecifiedAttributeName,
+    d2d_svg_element_GetSpecifiedAttributeNameLength,
+    d2d_svg_element_RemoveAttribute,
+    d2d_svg_element_SetTextValue,
+    d2d_svg_element_GetTextValue,
+    d2d_svg_element_GetTextValueLength,
+    d2d_svg_element_SetAttributeValueString,
+    d2d_svg_element_GetAttributeValueString,
+    d2d_svg_element_GetAttributeValueLength,
+    d2d_svg_element_SetAttributeValuePod,
+    d2d_svg_element_GetAttributeValuePod,
+    d2d_svg_element_SetAttributeValueObject,
+    d2d_svg_element_GetAttributeValueObject,
+};
+
+static HRESULT STDMETHODCALLTYPE d2d_svg_document_QueryInterface(ID2D1SvgDocument *iface, REFIID iid, void **out)
+{
+    TRACE("iface %p, iid %s, out %p.\n", iface, debugstr_guid(iid), out);
+
+    if (!out)
+        return E_INVALIDARG;
+
+    if (IsEqualGUID(iid, &IID_ID2D1SvgDocument_local) || IsEqualGUID(iid, &IID_ID2D1Resource)
+            || IsEqualGUID(iid, &IID_IUnknown))
+    {
+        d2d_svg_document_AddRef(iface);
+        *out = iface;
+        return S_OK;
+    }
+
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+
+static ULONG STDMETHODCALLTYPE d2d_svg_document_AddRef(ID2D1SvgDocument *iface)
+{
+    struct d2d_svg_document *document = impl_from_ID2D1SvgDocument(iface);
+    ULONG refcount = InterlockedIncrement(&document->refcount);
+
+    TRACE("%p increasing refcount to %lu.\n", iface, refcount);
+    return refcount;
+}
+
+static ULONG STDMETHODCALLTYPE d2d_svg_document_Release(ID2D1SvgDocument *iface)
+{
+    struct d2d_svg_document *document = impl_from_ID2D1SvgDocument(iface);
+    ULONG refcount = InterlockedDecrement(&document->refcount);
+
+    TRACE("%p decreasing refcount to %lu.\n", iface, refcount);
+    if (!refcount)
+    {
+        struct d2d_svg_element *element, *next;
+
+        for (element = document->elements; element; element = next)
+        {
+            next = element->allocation_next;
+            free(element);
+        }
+        ID2D1Factory_Release(document->factory);
+        free(document);
+    }
+    return refcount;
+}
+
+static void STDMETHODCALLTYPE d2d_svg_document_GetFactory(ID2D1SvgDocument *iface, ID2D1Factory **factory)
+{
+    struct d2d_svg_document *document = impl_from_ID2D1SvgDocument(iface);
+
+    TRACE("iface %p, factory %p.\n", iface, factory);
+    ID2D1Factory_AddRef(document->factory);
+    *factory = document->factory;
+}
+
+static HRESULT STDMETHODCALLTYPE d2d_svg_document_SetViewportSize(ID2D1SvgDocument *iface,
+        D2D1_SIZE_F viewport_size)
+{
+    struct d2d_svg_document *document = impl_from_ID2D1SvgDocument(iface);
+
+    TRACE("iface %p, viewport_size {%.8e, %.8e}.\n", iface, viewport_size.width, viewport_size.height);
+    document->viewport_size = viewport_size;
+    return S_OK;
+}
+
+static D2D1_SIZE_F * STDMETHODCALLTYPE d2d_svg_document_GetViewportSize(ID2D1SvgDocument *iface,
+        D2D1_SIZE_F *viewport_size)
+{
+    struct d2d_svg_document *document = impl_from_ID2D1SvgDocument(iface);
+
+    TRACE("iface %p, viewport_size %p.\n", iface, viewport_size);
+    *viewport_size = document->viewport_size;
+    return viewport_size;
+}
+
+static HRESULT STDMETHODCALLTYPE d2d_svg_document_SetRoot(ID2D1SvgDocument *iface, void *root)
+{
+    struct d2d_svg_document *document = impl_from_ID2D1SvgDocument(iface);
+
+    FIXME("iface %p, root %p semi-stub!\n", iface, root);
+    if (!root || root == &document->root.ID2D1SvgElement_iface)
+        return S_OK;
+    return E_NOTIMPL;
+}
+
+static void STDMETHODCALLTYPE d2d_svg_document_GetRoot(ID2D1SvgDocument *iface, void **root)
+{
+    struct d2d_svg_document *document = impl_from_ID2D1SvgDocument(iface);
+
+    FIXME("iface %p, root %p semi-stub!\n", iface, root);
+    d2d_svg_element_AddRef((ID2D1SvgElement *)&document->root.ID2D1SvgElement_iface);
+    *root = &document->root.ID2D1SvgElement_iface;
+}
+
+static HRESULT STDMETHODCALLTYPE d2d_svg_document_FindElementById(ID2D1SvgDocument *iface,
+        const WCHAR *id, void **element)
+{
+    FIXME("iface %p, id %s, element %p semi-stub!\n", iface, debugstr_w(id), element);
+    if (!id || !element)
+        return E_INVALIDARG;
+    *element = NULL;
+    return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE d2d_svg_document_Serialize(ID2D1SvgDocument *iface,
+        IStream *stream, void *subtree)
+{
+    FIXME("iface %p, stream %p, subtree %p stub!\n", iface, stream, subtree);
+    return E_NOTIMPL;
+}
+
+static HRESULT STDMETHODCALLTYPE d2d_svg_document_Deserialize(ID2D1SvgDocument *iface,
+        IStream *stream, void **subtree)
+{
+    FIXME("iface %p, stream %p, subtree %p stub!\n", iface, stream, subtree);
+    if (subtree)
+        *subtree = NULL;
+    return E_NOTIMPL;
+}
+
+static HRESULT STDMETHODCALLTYPE d2d_svg_document_CreatePaint(ID2D1SvgDocument *iface, UINT type,
+        const D2D1_COLOR_F *color, const WCHAR *id, void **paint)
+{
+    FIXME("iface %p, type %u, color %p, id %s, paint %p stub!\n",
+            iface, type, color, debugstr_w(id), paint);
+    if (paint)
+        *paint = NULL;
+    return E_NOTIMPL;
+}
+
+static HRESULT STDMETHODCALLTYPE d2d_svg_document_CreateStrokeDashArray(ID2D1SvgDocument *iface,
+        const void *dashes, UINT32 dash_count, void **array)
+{
+    FIXME("iface %p, dashes %p, dash_count %u, array %p stub!\n", iface, dashes, dash_count, array);
+    if (array)
+        *array = NULL;
+    return E_NOTIMPL;
+}
+
+static HRESULT STDMETHODCALLTYPE d2d_svg_document_CreatePointCollection(ID2D1SvgDocument *iface,
+        const D2D1_POINT_2F *points, UINT32 point_count, void **collection)
+{
+    FIXME("iface %p, points %p, point_count %u, collection %p stub!\n",
+            iface, points, point_count, collection);
+    if (collection)
+        *collection = NULL;
+    return E_NOTIMPL;
+}
+
+static HRESULT STDMETHODCALLTYPE d2d_svg_document_CreatePathData(ID2D1SvgDocument *iface,
+        const FLOAT *segment_data, UINT32 segment_count, const UINT *commands,
+        UINT32 command_count, void **path_data)
+{
+    FIXME("iface %p, segment_data %p, segment_count %u, commands %p, command_count %u, path_data %p stub!\n",
+            iface, segment_data, segment_count, commands, command_count, path_data);
+    if (path_data)
+        *path_data = NULL;
+    return E_NOTIMPL;
+}
+
+static const struct d2d_svg_document_vtbl d2d_svg_document_vtbl =
+{
+    d2d_svg_document_QueryInterface,
+    d2d_svg_document_AddRef,
+    d2d_svg_document_Release,
+    d2d_svg_document_GetFactory,
+    d2d_svg_document_SetViewportSize,
+    d2d_svg_document_GetViewportSize,
+    d2d_svg_document_SetRoot,
+    d2d_svg_document_GetRoot,
+    d2d_svg_document_FindElementById,
+    d2d_svg_document_Serialize,
+    d2d_svg_document_Deserialize,
+    d2d_svg_document_CreatePaint,
+    d2d_svg_document_CreateStrokeDashArray,
+    d2d_svg_document_CreatePointCollection,
+    d2d_svg_document_CreatePathData,
+};
+
+static HRESULT d2d_svg_document_create(struct d2d_device_context *context, D2D1_SIZE_F viewport_size,
+        ID2D1SvgDocument **document)
+{
+    struct d2d_svg_document *object;
+
+    if (!(object = calloc(1, sizeof(*object))))
+        return E_OUTOFMEMORY;
+
+    object->ID2D1SvgDocument_iface.lpVtbl = &d2d_svg_document_vtbl;
+    object->root.ID2D1SvgElement_iface.lpVtbl = &d2d_svg_element_vtbl;
+    object->root.document = object;
+    object->root.tag_name[0] = 's';
+    object->root.tag_name[1] = 'v';
+    object->root.tag_name[2] = 'g';
+    object->refcount = 1;
+    object->factory = context->factory;
+    ID2D1Factory_AddRef(object->factory);
+    object->viewport_size = viewport_size;
+    *document = (ID2D1SvgDocument *)&object->ID2D1SvgDocument_iface;
+    return S_OK;
+}
+
 static HRESULT STDMETHODCALLTYPE d2d_device_context_CreateSvgDocument(ID2D1DeviceContext6 *iface,
         IStream *input_xml_stream, D2D1_SIZE_F viewport_size, ID2D1SvgDocument **svg_document)
 {
-    FIXME("iface %p, input_xml_stream %p, svg_document %p stub!\n", iface, input_xml_stream,
-            svg_document);
+    struct d2d_device_context *context = impl_from_ID2D1DeviceContext(iface);
 
-    return E_NOTIMPL;
+    FIXME("iface %p, input_xml_stream %p, viewport_size {%.8e, %.8e}, svg_document %p semi-stub!\n",
+            iface, input_xml_stream, viewport_size.width, viewport_size.height, svg_document);
+
+    if (!svg_document)
+        return E_INVALIDARG;
+    *svg_document = NULL;
+    if (input_xml_stream)
+        return E_NOTIMPL;
+
+    return d2d_svg_document_create(context, viewport_size, svg_document);
 }
 
 static void STDMETHODCALLTYPE d2d_device_context_DrawSvgDocument(ID2D1DeviceContext6 *iface,

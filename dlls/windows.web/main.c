@@ -38,6 +38,8 @@ HRESULT WINAPI DllGetActivationFactory( HSTRING classid, IActivationFactory **fa
 
     *factory = NULL;
 
+    if (!wcscmp( buffer, RuntimeClass_Windows_Security_Authorization_AppCapabilityAccess_AppCapability ))
+        IActivationFactory_QueryInterface( app_capability_factory, &IID_IActivationFactory, (void **)factory );
     if (!wcscmp( buffer, RuntimeClass_Windows_Data_Json_JsonArray ))
         IActivationFactory_QueryInterface( json_array_factory, &IID_IActivationFactory, (void **)factory );
     if (!wcscmp( buffer, RuntimeClass_Windows_Data_Json_JsonObject ))

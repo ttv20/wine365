@@ -25,12 +25,17 @@
 #include "oleauto.h"
 #include "richole.h"
 #include "tom.h"
+#include "d2d1.h"
+#include "dwrite.h"
 #include "imm.h"
 #include "textserv.h"
 #include "wine/debug.h"
 #include "editstr.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(richedit);
+
+static const IID textservices_IID_IDWriteFactory =
+    {0xb859ee5a, 0xd838, 0x4b5b, {0xa2, 0xe8, 0x1a, 0xdc, 0x7d, 0x93, 0xdb, 0x48}};
 
 static inline struct text_services *impl_from_IUnknown( IUnknown *iface )
 {
@@ -44,11 +49,13 @@ static HRESULT WINAPI ITextServicesImpl_QueryInterface( IUnknown *iface, REFIID 
     TRACE( "(%p)->(%s, %p)\n", iface, debugstr_guid( iid ), obj );
 
     if (IsEqualIID( iid, &IID_IUnknown )) *obj = &services->IUnknown_inner;
-    else if (IsEqualIID( iid, &IID_ITextServices )) *obj = &services->ITextServices_iface;
+    else if (IsEqualIID( iid, &IID_ITextServices ) || IsEqualIID( iid, &IID_ITextServices2 ))
+        *obj = &services->ITextServices_iface;
     else if (IsEqualIID( iid, &IID_IRichEditOle )) *obj= &services->IRichEditOle_iface;
     else if (IsEqualIID( iid, &IID_IDispatch ) ||
              IsEqualIID( iid, &IID_ITextDocument ) ||
              IsEqualIID( iid, &IID_ITextDocument2Old )) *obj = &services->ITextDocument2Old_iface;
+    else if (IsEqualIID( iid, &IID_ITextDocument2 )) *obj = &services->ITextDocument2_iface;
     else
     {
         *obj = NULL;
@@ -550,29 +557,862 @@ const ITextServicesVtbl text_services_stdcall_vtbl =
 
 #endif /* __ASM_USE_THISCALL_WRAPPER */
 
-static const ITextServicesVtbl textservices_vtbl =
+struct text_services2_vtbl
 {
-    fnTextSrv_QueryInterface,
-    fnTextSrv_AddRef,
-    fnTextSrv_Release,
-    THISCALL(fnTextSrv_TxSendMessage),
-    THISCALL(fnTextSrv_TxDraw),
-    THISCALL(fnTextSrv_TxGetHScroll),
-    THISCALL(fnTextSrv_TxGetVScroll),
-    THISCALL(fnTextSrv_OnTxSetCursor),
-    THISCALL(fnTextSrv_TxQueryHitPoint),
-    THISCALL(fnTextSrv_OnTxInPlaceActivate),
-    THISCALL(fnTextSrv_OnTxInPlaceDeactivate),
-    THISCALL(fnTextSrv_OnTxUIActivate),
-    THISCALL(fnTextSrv_OnTxUIDeactivate),
-    THISCALL(fnTextSrv_TxGetText),
-    THISCALL(fnTextSrv_TxSetText),
-    THISCALL(fnTextSrv_TxGetCurTargetX),
-    THISCALL(fnTextSrv_TxGetBaseLinePos),
-    THISCALL(fnTextSrv_TxGetNaturalSize),
-    THISCALL(fnTextSrv_TxGetDropTarget),
-    THISCALL(fnTextSrv_OnTxPropertyBitsChange),
-    THISCALL(fnTextSrv_TxGetCachedSize)
+    ITextServicesVtbl base;
+    HRESULT (__thiscall *TxGetNaturalSize2)( ITextServices *iface, DWORD aspect, HDC draw,
+                                            HDC target, DVTARGETDEVICE *device, DWORD mode,
+                                            const SIZEL *extent, LONG *width, LONG *height,
+                                            LONG *ascent );
+    HRESULT (__thiscall *TxDrawD2D)( ITextServices *iface, IUnknown *render_target,
+                                    const RECTL *bounds, RECT *update, LONG view_id );
+};
+
+DEFINE_THISCALL_WRAPPER(fnTextSrv_TxDrawD2D,20)
+static HRESULT __thiscall fnTextSrv_TxDrawD2D( ITextServices *iface, IUnknown *render_target,
+                                               const RECTL *bounds, RECT *update, LONG view_id )
+{
+    ID2D1RenderTarget *target = (ID2D1RenderTarget *)render_target;
+    ID2D1SolidColorBrush *brush = NULL;
+    IDWriteTextFormat *format = NULL;
+    IDWriteFactory *factory = NULL;
+    D2D1_COLOR_F color = {0.0f, 0.0f, 0.0f, 1.0f};
+    D2D1_RECT_F layout;
+    BSTR text = NULL;
+    HRESULT hr;
+
+    TRACE( "iface %p, render_target %p, bounds %s, update %s, view_id %ld.\n",
+           iface, render_target, wine_dbgstr_rect( (RECT *)bounds ), wine_dbgstr_rect( update ), view_id );
+
+    if (!target || !bounds) return E_INVALIDARG;
+    if (bounds->right <= bounds->left || bounds->bottom <= bounds->top) return S_OK;
+
+    hr = fnTextSrv_TxGetText( iface, &text );
+    if (FAILED(hr) || !text || !SysStringLen(text)) goto done;
+    hr = DWriteCreateFactory( DWRITE_FACTORY_TYPE_SHARED, &textservices_IID_IDWriteFactory,
+                              (IUnknown **)&factory );
+    if (FAILED(hr)) goto done;
+    hr = IDWriteFactory_CreateTextFormat( factory, L"Segoe UI", NULL,
+                                          DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL,
+                                          DWRITE_FONT_STRETCH_NORMAL, 12.0f, L"en-us", &format );
+    if (FAILED(hr)) goto done;
+    hr = ID2D1RenderTarget_CreateSolidColorBrush( target, &color, NULL, &brush );
+    if (FAILED(hr)) goto done;
+
+    layout.left = bounds->left;
+    layout.top = bounds->top;
+    layout.right = bounds->right;
+    layout.bottom = bounds->bottom;
+    ID2D1RenderTarget_DrawText( target, text, SysStringLen(text), format, &layout,
+                                (ID2D1Brush *)brush,
+                                D2D1_DRAW_TEXT_OPTIONS_CLIP, DWRITE_MEASURING_MODE_NATURAL );
+    hr = S_OK;
+
+done:
+    if (brush) ID2D1SolidColorBrush_Release( brush );
+    if (format) IDWriteTextFormat_Release( format );
+    if (factory) IDWriteFactory_Release( factory );
+    SysFreeString( text );
+    if (FAILED(hr))
+        FIXME( "DirectWrite compatibility draw failed, hr %#lx.\n", hr );
+    return S_OK;
+}
+
+DEFINE_THISCALL_WRAPPER(fnTextSrv_TxGetNaturalSize2,40)
+static HRESULT __thiscall fnTextSrv_TxGetNaturalSize2( ITextServices *iface, DWORD aspect, HDC draw,
+                                                       HDC target, DVTARGETDEVICE *device, DWORD mode,
+                                                       const SIZEL *extent, LONG *width, LONG *height,
+                                                       LONG *ascent )
+{
+    HRESULT hr;
+
+    hr = fnTextSrv_TxGetNaturalSize( iface, aspect, draw, target, device, mode, extent, width, height );
+    if (SUCCEEDED(hr) && ascent) *ascent = 0;
+    return hr;
+}
+
+static const struct text_services2_vtbl textservices_vtbl =
+{
+    {
+        fnTextSrv_QueryInterface,
+        fnTextSrv_AddRef,
+        fnTextSrv_Release,
+        THISCALL(fnTextSrv_TxSendMessage),
+        THISCALL(fnTextSrv_TxDraw),
+        THISCALL(fnTextSrv_TxGetHScroll),
+        THISCALL(fnTextSrv_TxGetVScroll),
+        THISCALL(fnTextSrv_OnTxSetCursor),
+        THISCALL(fnTextSrv_TxQueryHitPoint),
+        THISCALL(fnTextSrv_OnTxInPlaceActivate),
+        THISCALL(fnTextSrv_OnTxInPlaceDeactivate),
+        THISCALL(fnTextSrv_OnTxUIActivate),
+        THISCALL(fnTextSrv_OnTxUIDeactivate),
+        THISCALL(fnTextSrv_TxGetText),
+        THISCALL(fnTextSrv_TxSetText),
+        THISCALL(fnTextSrv_TxGetCurTargetX),
+        THISCALL(fnTextSrv_TxGetBaseLinePos),
+        THISCALL(fnTextSrv_TxGetNaturalSize),
+        THISCALL(fnTextSrv_TxGetDropTarget),
+        THISCALL(fnTextSrv_OnTxPropertyBitsChange),
+        THISCALL(fnTextSrv_TxGetCachedSize),
+    },
+    THISCALL(fnTextSrv_TxGetNaturalSize2),
+    THISCALL(fnTextSrv_TxDrawD2D),
+};
+
+static inline struct text_services *impl_from_ITextDocument2( ITextDocument2 *iface )
+{
+    return CONTAINING_RECORD( iface, struct text_services, ITextDocument2_iface );
+}
+
+static HRESULT WINAPI fnTextDoc2_QueryInterface( ITextDocument2 *iface, REFIID iid, void **obj )
+{
+    struct text_services *services = impl_from_ITextDocument2( iface );
+    return IUnknown_QueryInterface( services->outer_unk, iid, obj );
+}
+
+static ULONG WINAPI fnTextDoc2_AddRef( ITextDocument2 *iface )
+{
+    struct text_services *services = impl_from_ITextDocument2( iface );
+    return IUnknown_AddRef( services->outer_unk );
+}
+
+static ULONG WINAPI fnTextDoc2_Release( ITextDocument2 *iface )
+{
+    struct text_services *services = impl_from_ITextDocument2( iface );
+    return IUnknown_Release( services->outer_unk );
+}
+
+#define DOC2_FORWARD0(name) \
+static HRESULT WINAPI fnTextDoc2_##name( ITextDocument2 *iface ) \
+{ \
+    struct text_services *services = impl_from_ITextDocument2( iface ); \
+    return ITextDocument2Old_##name( &services->ITextDocument2Old_iface ); \
+}
+
+#define DOC2_FORWARD(name, decl, ...) \
+static HRESULT WINAPI fnTextDoc2_##name decl \
+{ \
+    struct text_services *services = impl_from_ITextDocument2( iface ); \
+    return ITextDocument2Old_##name( &services->ITextDocument2Old_iface, __VA_ARGS__ ); \
+}
+
+DOC2_FORWARD(GetTypeInfoCount, (ITextDocument2 *iface, UINT *count), count)
+DOC2_FORWARD(GetTypeInfo, (ITextDocument2 *iface, UINT index, LCID lcid, ITypeInfo **info), index, lcid, info)
+DOC2_FORWARD(GetIDsOfNames, (ITextDocument2 *iface, REFIID iid, LPOLESTR *names, UINT count,
+        LCID lcid, DISPID *ids), iid, names, count, lcid, ids)
+DOC2_FORWARD(Invoke, (ITextDocument2 *iface, DISPID id, REFIID iid, LCID lcid, WORD flags,
+        DISPPARAMS *params, VARIANT *result, EXCEPINFO *exception, UINT *argerr),
+        id, iid, lcid, flags, params, result, exception, argerr)
+DOC2_FORWARD(GetName, (ITextDocument2 *iface, BSTR *name), name)
+DOC2_FORWARD(GetSelection, (ITextDocument2 *iface, ITextSelection **selection), selection)
+DOC2_FORWARD(GetStoryCount, (ITextDocument2 *iface, LONG *count), count)
+DOC2_FORWARD(GetStoryRanges, (ITextDocument2 *iface, ITextStoryRanges **stories), stories)
+DOC2_FORWARD(GetSaved, (ITextDocument2 *iface, LONG *value), value)
+DOC2_FORWARD(SetSaved, (ITextDocument2 *iface, LONG value), value)
+DOC2_FORWARD(GetDefaultTabStop, (ITextDocument2 *iface, float *value), value)
+DOC2_FORWARD(SetDefaultTabStop, (ITextDocument2 *iface, float value), value)
+DOC2_FORWARD0(New)
+DOC2_FORWARD(Open, (ITextDocument2 *iface, VARIANT *value, LONG flags, LONG codepage), value, flags, codepage)
+DOC2_FORWARD(Save, (ITextDocument2 *iface, VARIANT *value, LONG flags, LONG codepage), value, flags, codepage)
+DOC2_FORWARD(Freeze, (ITextDocument2 *iface, LONG *count), count)
+DOC2_FORWARD(Unfreeze, (ITextDocument2 *iface, LONG *count), count)
+DOC2_FORWARD0(BeginEditCollection)
+DOC2_FORWARD0(EndEditCollection)
+DOC2_FORWARD(Undo, (ITextDocument2 *iface, LONG count, LONG *prop), count, prop)
+DOC2_FORWARD(Redo, (ITextDocument2 *iface, LONG count, LONG *prop), count, prop)
+DOC2_FORWARD(Range, (ITextDocument2 *iface, LONG start, LONG end, ITextRange **range), start, end, range)
+DOC2_FORWARD(RangeFromPoint, (ITextDocument2 *iface, LONG x, LONG y, ITextRange **range), x, y, range)
+DOC2_FORWARD(GetCaretType, (ITextDocument2 *iface, LONG *value), value)
+DOC2_FORWARD(SetCaretType, (ITextDocument2 *iface, LONG value), value)
+DOC2_FORWARD(GetNotificationMode, (ITextDocument2 *iface, LONG *mode), mode)
+DOC2_FORWARD(SetNotificationMode, (ITextDocument2 *iface, LONG mode), mode)
+DOC2_FORWARD(GetWindow, (ITextDocument2 *iface, LONG *hwnd), hwnd)
+DOC2_FORWARD(AttachMsgFilter, (ITextDocument2 *iface, IUnknown *filter), filter)
+DOC2_FORWARD(CheckTextLimit, (ITextDocument2 *iface, LONG count, LONG *exceed), count, exceed)
+DOC2_FORWARD(GetClientRect, (ITextDocument2 *iface, LONG type, LONG *left, LONG *top, LONG *right,
+        LONG *bottom), type, left, top, right, bottom)
+DOC2_FORWARD(GetEffectColor, (ITextDocument2 *iface, LONG index, COLORREF *color), index, color)
+DOC2_FORWARD(GetImmContext, (ITextDocument2 *iface, LONG *context), context)
+DOC2_FORWARD(GetPreferredFont, (ITextDocument2 *iface, LONG cp, LONG codepage, LONG option,
+        LONG current_codepage, LONG current_size, BSTR *name, LONG *pitch_family, LONG *new_size),
+        cp, codepage, option, current_codepage, current_size, name, pitch_family, new_size)
+DOC2_FORWARD(Notify, (ITextDocument2 *iface, LONG notify), notify)
+DOC2_FORWARD(ReleaseImmContext, (ITextDocument2 *iface, LONG context), context)
+DOC2_FORWARD(SetEffectColor, (ITextDocument2 *iface, LONG index, LONG color), index, color)
+DOC2_FORWARD0(SysBeep)
+DOC2_FORWARD(Update, (ITextDocument2 *iface, LONG value), value)
+DOC2_FORWARD0(UpdateWindow)
+
+#undef DOC2_FORWARD
+#undef DOC2_FORWARD0
+
+static HRESULT WINAPI fnTextDoc2_SetIMEInProgress( ITextDocument2 *iface, LONG value )
+{
+    struct text_services *services = impl_from_ITextDocument2( iface );
+    return ITextDocument2Old_IMEInProgress( &services->ITextDocument2Old_iface, value );
+}
+
+static HRESULT WINAPI fnTextDoc2_GetDisplays( ITextDocument2 *iface, ITextDisplays **displays )
+{
+    if (displays) *displays = NULL;
+    return E_NOTIMPL;
+}
+
+static HRESULT WINAPI fnTextDoc2_GetDocumentFont( ITextDocument2 *iface, ITextFont2 **font )
+{
+    if (font) *font = NULL;
+    return E_NOTIMPL;
+}
+
+static HRESULT WINAPI fnTextDoc2_SetDocumentFont( ITextDocument2 *iface, ITextFont2 *font )
+{
+    return E_NOTIMPL;
+}
+
+static HRESULT WINAPI fnTextDoc2_GetDocumentPara( ITextDocument2 *iface, ITextPara2 **para )
+{
+    if (para) *para = NULL;
+    return E_NOTIMPL;
+}
+
+static HRESULT WINAPI fnTextDoc2_SetDocumentPara( ITextDocument2 *iface, ITextPara2 *para )
+{
+    return E_NOTIMPL;
+}
+
+static HRESULT WINAPI fnTextDoc2_GetEastAsianFlags( ITextDocument2 *iface, LONG *flags )
+{
+    if (!flags) return E_INVALIDARG;
+    *flags = 0;
+    return S_OK;
+}
+
+static HRESULT WINAPI fnTextDoc2_GetGenerator( ITextDocument2 *iface, BSTR *generator )
+{
+    if (!generator) return E_INVALIDARG;
+    *generator = SysAllocString( L"Wine RichEdit" );
+    return *generator ? S_OK : E_OUTOFMEMORY;
+}
+
+static HRESULT WINAPI fnTextDoc2_GetSelection2( ITextDocument2 *iface, ITextSelection2 **selection )
+{
+    if (selection) *selection = NULL;
+    return E_NOTIMPL;
+}
+
+static HRESULT WINAPI fnTextDoc2_GetStoryRanges2( ITextDocument2 *iface, ITextStoryRanges2 **stories )
+{
+    if (stories) *stories = NULL;
+    return E_NOTIMPL;
+}
+
+static HRESULT WINAPI fnTextDoc2_GetTypographyOptions( ITextDocument2 *iface, LONG *options )
+{
+    if (!options) return E_INVALIDARG;
+    *options = 0;
+    return S_OK;
+}
+
+static HRESULT WINAPI fnTextDoc2_GetVersion( ITextDocument2 *iface, LONG *version )
+{
+    if (!version) return E_INVALIDARG;
+    *version = 8;
+    return S_OK;
+}
+
+static HRESULT WINAPI fnTextDoc2_GetCallManager( ITextDocument2 *iface, IUnknown **manager )
+{
+    if (manager) *manager = NULL;
+    return E_NOTIMPL;
+}
+
+static HRESULT WINAPI fnTextDoc2_GetProperty( ITextDocument2 *iface, LONG type, LONG *value )
+{
+    if (!value) return E_INVALIDARG;
+    *value = 0;
+    return S_OK;
+}
+
+static HRESULT WINAPI fnTextDoc2_GetStrings( ITextDocument2 *iface, ITextStrings **strings )
+{
+    if (strings) *strings = NULL;
+    return E_NOTIMPL;
+}
+
+struct text_range2_proxy
+{
+    ITextRange2 ITextRange2_iface;
+    LONG ref;
+    ITextRange *range;
+};
+
+static HRESULT create_text_range2_proxy( ITextRange *base_range, ITextRange2 **range );
+
+static inline struct text_range2_proxy *impl_from_ITextRange2( ITextRange2 *iface )
+{
+    return CONTAINING_RECORD( iface, struct text_range2_proxy, ITextRange2_iface );
+}
+
+static HRESULT WINAPI fnTextRange2_QueryInterface( ITextRange2 *iface, REFIID iid, void **obj )
+{
+    if (!obj) return E_POINTER;
+    *obj = NULL;
+    if (!IsEqualIID( iid, &IID_IUnknown ) && !IsEqualIID( iid, &IID_IDispatch ) &&
+        !IsEqualIID( iid, &IID_ITextRange ) && !IsEqualIID( iid, &IID_ITextSelection ) &&
+        !IsEqualIID( iid, &IID_ITextRange2 ))
+        return E_NOINTERFACE;
+    *obj = iface;
+    ITextRange2_AddRef( iface );
+    return S_OK;
+}
+
+static ULONG WINAPI fnTextRange2_AddRef( ITextRange2 *iface )
+{
+    struct text_range2_proxy *proxy = impl_from_ITextRange2( iface );
+    return InterlockedIncrement( &proxy->ref );
+}
+
+static ULONG WINAPI fnTextRange2_Release( ITextRange2 *iface )
+{
+    struct text_range2_proxy *proxy = impl_from_ITextRange2( iface );
+    ULONG ref = InterlockedDecrement( &proxy->ref );
+
+    if (!ref)
+    {
+        ITextRange_Release( proxy->range );
+        free( proxy );
+    }
+    return ref;
+}
+
+#define RANGE2_FORWARD0(name) \
+static HRESULT WINAPI fnTextRange2_##name( ITextRange2 *iface ) \
+{ \
+    struct text_range2_proxy *proxy = impl_from_ITextRange2( iface ); \
+    return ITextRange_##name( proxy->range ); \
+}
+
+#define RANGE2_FORWARD(name, decl, ...) \
+static HRESULT WINAPI fnTextRange2_##name decl \
+{ \
+    struct text_range2_proxy *proxy = impl_from_ITextRange2( iface ); \
+    return ITextRange_##name( proxy->range, __VA_ARGS__ ); \
+}
+
+RANGE2_FORWARD(GetTypeInfoCount, (ITextRange2 *iface, UINT *count), count)
+RANGE2_FORWARD(GetTypeInfo, (ITextRange2 *iface, UINT index, LCID lcid, ITypeInfo **info),
+        index, lcid, info)
+RANGE2_FORWARD(GetIDsOfNames, (ITextRange2 *iface, REFIID iid, LPOLESTR *names, UINT count,
+        LCID lcid, DISPID *ids), iid, names, count, lcid, ids)
+RANGE2_FORWARD(Invoke, (ITextRange2 *iface, DISPID id, REFIID iid, LCID lcid, WORD flags,
+        DISPPARAMS *params, VARIANT *result, EXCEPINFO *exception, UINT *argerr),
+        id, iid, lcid, flags, params, result, exception, argerr)
+RANGE2_FORWARD(GetText, (ITextRange2 *iface, BSTR *text), text)
+RANGE2_FORWARD(SetText, (ITextRange2 *iface, BSTR text), text)
+RANGE2_FORWARD(GetChar, (ITextRange2 *iface, LONG *ch), ch)
+RANGE2_FORWARD(SetChar, (ITextRange2 *iface, LONG ch), ch)
+RANGE2_FORWARD(GetDuplicate, (ITextRange2 *iface, ITextRange **range), range)
+RANGE2_FORWARD(GetFormattedText, (ITextRange2 *iface, ITextRange **range), range)
+RANGE2_FORWARD(SetFormattedText, (ITextRange2 *iface, ITextRange *range), range)
+RANGE2_FORWARD(GetStart, (ITextRange2 *iface, LONG *start), start)
+RANGE2_FORWARD(SetStart, (ITextRange2 *iface, LONG start), start)
+RANGE2_FORWARD(GetEnd, (ITextRange2 *iface, LONG *end), end)
+RANGE2_FORWARD(SetEnd, (ITextRange2 *iface, LONG end), end)
+RANGE2_FORWARD(GetFont, (ITextRange2 *iface, ITextFont **font), font)
+RANGE2_FORWARD(SetFont, (ITextRange2 *iface, ITextFont *font), font)
+RANGE2_FORWARD(GetPara, (ITextRange2 *iface, ITextPara **para), para)
+RANGE2_FORWARD(SetPara, (ITextRange2 *iface, ITextPara *para), para)
+RANGE2_FORWARD(GetStoryLength, (ITextRange2 *iface, LONG *length), length)
+RANGE2_FORWARD(GetStoryType, (ITextRange2 *iface, LONG *type), type)
+RANGE2_FORWARD(Collapse, (ITextRange2 *iface, LONG start), start)
+RANGE2_FORWARD(Expand, (ITextRange2 *iface, LONG unit, LONG *delta), unit, delta)
+RANGE2_FORWARD(GetIndex, (ITextRange2 *iface, LONG unit, LONG *index), unit, index)
+RANGE2_FORWARD(SetIndex, (ITextRange2 *iface, LONG unit, LONG index, LONG extend), unit, index, extend)
+RANGE2_FORWARD(SetRange, (ITextRange2 *iface, LONG anchor, LONG active), anchor, active)
+RANGE2_FORWARD(InRange, (ITextRange2 *iface, ITextRange *range, LONG *value), range, value)
+RANGE2_FORWARD(InStory, (ITextRange2 *iface, ITextRange *range, LONG *value), range, value)
+RANGE2_FORWARD(IsEqual, (ITextRange2 *iface, ITextRange *range, LONG *value), range, value)
+RANGE2_FORWARD0(Select)
+RANGE2_FORWARD(StartOf, (ITextRange2 *iface, LONG unit, LONG extend, LONG *delta), unit, extend, delta)
+RANGE2_FORWARD(EndOf, (ITextRange2 *iface, LONG unit, LONG extend, LONG *delta), unit, extend, delta)
+RANGE2_FORWARD(Move, (ITextRange2 *iface, LONG unit, LONG count, LONG *delta), unit, count, delta)
+RANGE2_FORWARD(MoveStart, (ITextRange2 *iface, LONG unit, LONG count, LONG *delta), unit, count, delta)
+RANGE2_FORWARD(MoveEnd, (ITextRange2 *iface, LONG unit, LONG count, LONG *delta), unit, count, delta)
+RANGE2_FORWARD(MoveWhile, (ITextRange2 *iface, VARIANT *set, LONG count, LONG *delta), set, count, delta)
+RANGE2_FORWARD(MoveStartWhile, (ITextRange2 *iface, VARIANT *set, LONG count, LONG *delta),
+        set, count, delta)
+RANGE2_FORWARD(MoveEndWhile, (ITextRange2 *iface, VARIANT *set, LONG count, LONG *delta),
+        set, count, delta)
+RANGE2_FORWARD(MoveUntil, (ITextRange2 *iface, VARIANT *set, LONG count, LONG *delta), set, count, delta)
+RANGE2_FORWARD(MoveStartUntil, (ITextRange2 *iface, VARIANT *set, LONG count, LONG *delta),
+        set, count, delta)
+RANGE2_FORWARD(MoveEndUntil, (ITextRange2 *iface, VARIANT *set, LONG count, LONG *delta),
+        set, count, delta)
+RANGE2_FORWARD(FindText, (ITextRange2 *iface, BSTR text, LONG count, LONG flags, LONG *length),
+        text, count, flags, length)
+RANGE2_FORWARD(FindTextStart, (ITextRange2 *iface, BSTR text, LONG count, LONG flags, LONG *length),
+        text, count, flags, length)
+RANGE2_FORWARD(FindTextEnd, (ITextRange2 *iface, BSTR text, LONG count, LONG flags, LONG *length),
+        text, count, flags, length)
+RANGE2_FORWARD(Delete, (ITextRange2 *iface, LONG unit, LONG count, LONG *delta), unit, count, delta)
+RANGE2_FORWARD(Cut, (ITextRange2 *iface, VARIANT *value), value)
+RANGE2_FORWARD(Copy, (ITextRange2 *iface, VARIANT *value), value)
+RANGE2_FORWARD(Paste, (ITextRange2 *iface, VARIANT *value, LONG format), value, format)
+RANGE2_FORWARD(CanPaste, (ITextRange2 *iface, VARIANT *value, LONG format, LONG *result),
+        value, format, result)
+RANGE2_FORWARD(CanEdit, (ITextRange2 *iface, LONG *result), result)
+RANGE2_FORWARD(ChangeCase, (ITextRange2 *iface, LONG type), type)
+RANGE2_FORWARD(GetPoint, (ITextRange2 *iface, LONG type, LONG *x, LONG *y), type, x, y)
+RANGE2_FORWARD(SetPoint, (ITextRange2 *iface, LONG x, LONG y, LONG type, LONG extend),
+        x, y, type, extend)
+RANGE2_FORWARD(ScrollIntoView, (ITextRange2 *iface, LONG value), value)
+RANGE2_FORWARD(GetEmbeddedObject, (ITextRange2 *iface, IUnknown **object), object)
+
+#define RANGE2_SELECTION_FORWARD(name, decl, ...) \
+static HRESULT WINAPI fnTextRange2_##name decl \
+{ \
+    struct text_range2_proxy *proxy = impl_from_ITextRange2( iface ); \
+    ITextSelection *selection; \
+    HRESULT hr; \
+    hr = ITextRange_QueryInterface( proxy->range, &IID_ITextSelection, (void **)&selection ); \
+    if (FAILED(hr)) return E_NOTIMPL; \
+    hr = ITextSelection_##name( selection, __VA_ARGS__ ); \
+    ITextSelection_Release( selection ); \
+    return hr; \
+}
+
+RANGE2_SELECTION_FORWARD(GetFlags, (ITextRange2 *iface, LONG *flags), flags)
+RANGE2_SELECTION_FORWARD(SetFlags, (ITextRange2 *iface, LONG flags), flags)
+RANGE2_SELECTION_FORWARD(GetType, (ITextRange2 *iface, LONG *type), type)
+RANGE2_SELECTION_FORWARD(MoveLeft, (ITextRange2 *iface, LONG unit, LONG count, LONG extend, LONG *delta),
+        unit, count, extend, delta)
+RANGE2_SELECTION_FORWARD(MoveRight, (ITextRange2 *iface, LONG unit, LONG count, LONG extend, LONG *delta),
+        unit, count, extend, delta)
+RANGE2_SELECTION_FORWARD(MoveUp, (ITextRange2 *iface, LONG unit, LONG count, LONG extend, LONG *delta),
+        unit, count, extend, delta)
+RANGE2_SELECTION_FORWARD(MoveDown, (ITextRange2 *iface, LONG unit, LONG count, LONG extend, LONG *delta),
+        unit, count, extend, delta)
+RANGE2_SELECTION_FORWARD(HomeKey, (ITextRange2 *iface, LONG unit, LONG extend, LONG *delta),
+        unit, extend, delta)
+RANGE2_SELECTION_FORWARD(EndKey, (ITextRange2 *iface, LONG unit, LONG extend, LONG *delta),
+        unit, extend, delta)
+RANGE2_SELECTION_FORWARD(TypeText, (ITextRange2 *iface, BSTR text), text)
+
+static HRESULT WINAPI fnTextRange2_GetCch( ITextRange2 *iface, LONG *count )
+{
+    struct text_range2_proxy *proxy = impl_from_ITextRange2( iface );
+    LONG start, end;
+    HRESULT hr;
+
+    if (!count) return E_INVALIDARG;
+    *count = 0;
+    hr = ITextRange_GetStart( proxy->range, &start );
+    if (SUCCEEDED(hr)) hr = ITextRange_GetEnd( proxy->range, &end );
+    if (SUCCEEDED(hr)) *count = end - start;
+    return hr;
+}
+
+static HRESULT WINAPI fnTextRange2_GetFont2( ITextRange2 *iface, ITextFont2 **font )
+{
+    if (font) *font = NULL;
+    return E_NOTIMPL;
+}
+
+static HRESULT WINAPI fnTextRange2_GetDuplicate2( ITextRange2 *iface, ITextRange2 **range )
+{
+    struct text_range2_proxy *proxy = impl_from_ITextRange2( iface );
+    ITextRange *duplicate;
+    HRESULT hr;
+
+    if (!range) return E_INVALIDARG;
+    *range = NULL;
+    hr = ITextRange_GetDuplicate( proxy->range, &duplicate );
+    if (FAILED(hr)) return hr;
+    return create_text_range2_proxy( duplicate, range );
+}
+
+static HRESULT WINAPI fnTextRange2_GetFormattedText2( ITextRange2 *iface, ITextRange2 **range )
+{
+    struct text_range2_proxy *proxy = impl_from_ITextRange2( iface );
+    ITextRange *formatted;
+    HRESULT hr;
+
+    if (!range) return E_INVALIDARG;
+    *range = NULL;
+    hr = ITextRange_GetFormattedText( proxy->range, &formatted );
+    if (hr == E_NOTIMPL)
+        hr = ITextRange_GetDuplicate( proxy->range, &formatted );
+    if (FAILED(hr)) return hr;
+    return create_text_range2_proxy( formatted, range );
+}
+
+static HRESULT WINAPI fnTextRange2_SetFormattedText2( ITextRange2 *iface, ITextRange2 *range )
+{
+    struct text_range2_proxy *proxy = impl_from_ITextRange2( iface );
+    ITextRange *base_range;
+    BSTR text;
+    HRESULT hr;
+
+    if (!range) return E_INVALIDARG;
+    hr = ITextRange2_QueryInterface( range, &IID_ITextRange, (void **)&base_range );
+    if (FAILED(hr)) return hr;
+    hr = ITextRange_SetFormattedText( proxy->range, base_range );
+    if (hr == E_NOTIMPL)
+    {
+        text = NULL;
+        hr = ITextRange_GetText( base_range, &text );
+        if (SUCCEEDED(hr)) hr = ITextRange_SetText( proxy->range, text );
+        SysFreeString( text );
+    }
+    ITextRange_Release( base_range );
+    return hr;
+}
+
+static HRESULT WINAPI fnTextRange2_GetText2( ITextRange2 *iface, LONG flags, BSTR *text )
+{
+    struct text_range2_proxy *proxy = impl_from_ITextRange2( iface );
+
+    if (flags) return E_NOTIMPL;
+    return ITextRange_GetText( proxy->range, text );
+}
+
+static HRESULT WINAPI fnTextRange2_SetText2( ITextRange2 *iface, LONG flags, BSTR text )
+{
+    struct text_range2_proxy *proxy = impl_from_ITextRange2( iface );
+
+    if (flags) return E_NOTIMPL;
+    return ITextRange_SetText( proxy->range, text );
+}
+
+#define RANGE2_STUB(name, decl) \
+static HRESULT WINAPI fnTextRange2_##name decl \
+{ \
+    return E_NOTIMPL; \
+}
+
+RANGE2_STUB(GetCells, (ITextRange2 *iface, IUnknown **cells))
+RANGE2_STUB(GetColumn, (ITextRange2 *iface, IUnknown **column))
+RANGE2_STUB(GetCount, (ITextRange2 *iface, LONG *count))
+RANGE2_STUB(SetFont2, (ITextRange2 *iface, ITextFont2 *font))
+RANGE2_STUB(GetGravity, (ITextRange2 *iface, LONG *value))
+RANGE2_STUB(SetGravity, (ITextRange2 *iface, LONG value))
+RANGE2_STUB(GetPara2, (ITextRange2 *iface, ITextPara2 **para))
+RANGE2_STUB(SetPara2, (ITextRange2 *iface, ITextPara2 *para))
+RANGE2_STUB(GetRow, (ITextRange2 *iface, ITextRow **row))
+RANGE2_STUB(GetStartPara, (ITextRange2 *iface, LONG *value))
+RANGE2_STUB(GetTable, (ITextRange2 *iface, IUnknown **table))
+RANGE2_STUB(GetURL, (ITextRange2 *iface, BSTR *url))
+RANGE2_STUB(SetURL, (ITextRange2 *iface, BSTR url))
+RANGE2_STUB(AddSubrange, (ITextRange2 *iface, LONG cp1, LONG cp2, LONG activate))
+RANGE2_STUB(BuildUpMath, (ITextRange2 *iface, LONG flags))
+RANGE2_STUB(DeleteSubrange, (ITextRange2 *iface, LONG first, LONG limit))
+RANGE2_STUB(Find, (ITextRange2 *iface, ITextRange2 *range, LONG count, LONG flags, LONG *delta))
+RANGE2_STUB(GetChar2, (ITextRange2 *iface, LONG *ch, LONG offset))
+RANGE2_STUB(GetDropCap, (ITextRange2 *iface, LONG *line, LONG *position))
+RANGE2_STUB(GetInlineObject, (ITextRange2 *iface, LONG *type, LONG *align, LONG *ch, LONG *ch1,
+        LONG *ch2, LONG *count, LONG *style, LONG *columns, LONG *level))
+RANGE2_STUB(GetProperty, (ITextRange2 *iface, LONG type, LONG *value))
+RANGE2_STUB(GetRect, (ITextRange2 *iface, LONG type, LONG *left, LONG *top, LONG *right,
+        LONG *bottom, LONG *hit))
+RANGE2_STUB(GetSubrange, (ITextRange2 *iface, LONG subrange, LONG *first, LONG *limit))
+RANGE2_STUB(HexToUnicode, (ITextRange2 *iface))
+RANGE2_STUB(InsertTable, (ITextRange2 *iface, LONG columns, LONG rows, LONG autofit))
+RANGE2_STUB(Linearize, (ITextRange2 *iface, LONG flags))
+RANGE2_STUB(SetActiveSubrange, (ITextRange2 *iface, LONG anchor, LONG active))
+RANGE2_STUB(SetDropCap, (ITextRange2 *iface, LONG line, LONG position))
+RANGE2_STUB(SetProperty, (ITextRange2 *iface, LONG type, LONG value))
+RANGE2_STUB(UnicodeToHex, (ITextRange2 *iface))
+RANGE2_STUB(SetInlineObject, (ITextRange2 *iface, LONG type, LONG align, LONG ch, LONG ch1,
+        LONG ch2, LONG count, LONG style, LONG columns))
+RANGE2_STUB(GetMathFunctionType, (ITextRange2 *iface, BSTR text, LONG *value))
+RANGE2_STUB(InsertImage, (ITextRange2 *iface, LONG width, LONG height, LONG ascent, LONG type,
+        BSTR alttext, IStream *stream))
+
+static const ITextRange2Vtbl text_range2_vtbl =
+{
+    .QueryInterface = fnTextRange2_QueryInterface,
+    .AddRef = fnTextRange2_AddRef,
+    .Release = fnTextRange2_Release,
+    .GetTypeInfoCount = fnTextRange2_GetTypeInfoCount,
+    .GetTypeInfo = fnTextRange2_GetTypeInfo,
+    .GetIDsOfNames = fnTextRange2_GetIDsOfNames,
+    .Invoke = fnTextRange2_Invoke,
+    .GetText = fnTextRange2_GetText,
+    .SetText = fnTextRange2_SetText,
+    .GetChar = fnTextRange2_GetChar,
+    .SetChar = fnTextRange2_SetChar,
+    .GetDuplicate = fnTextRange2_GetDuplicate,
+    .GetFormattedText = fnTextRange2_GetFormattedText,
+    .SetFormattedText = fnTextRange2_SetFormattedText,
+    .GetStart = fnTextRange2_GetStart,
+    .SetStart = fnTextRange2_SetStart,
+    .GetEnd = fnTextRange2_GetEnd,
+    .SetEnd = fnTextRange2_SetEnd,
+    .GetFont = fnTextRange2_GetFont,
+    .SetFont = fnTextRange2_SetFont,
+    .GetPara = fnTextRange2_GetPara,
+    .SetPara = fnTextRange2_SetPara,
+    .GetStoryLength = fnTextRange2_GetStoryLength,
+    .GetStoryType = fnTextRange2_GetStoryType,
+    .Collapse = fnTextRange2_Collapse,
+    .Expand = fnTextRange2_Expand,
+    .GetIndex = fnTextRange2_GetIndex,
+    .SetIndex = fnTextRange2_SetIndex,
+    .SetRange = fnTextRange2_SetRange,
+    .InRange = fnTextRange2_InRange,
+    .InStory = fnTextRange2_InStory,
+    .IsEqual = fnTextRange2_IsEqual,
+    .Select = fnTextRange2_Select,
+    .StartOf = fnTextRange2_StartOf,
+    .EndOf = fnTextRange2_EndOf,
+    .Move = fnTextRange2_Move,
+    .MoveStart = fnTextRange2_MoveStart,
+    .MoveEnd = fnTextRange2_MoveEnd,
+    .MoveWhile = fnTextRange2_MoveWhile,
+    .MoveStartWhile = fnTextRange2_MoveStartWhile,
+    .MoveEndWhile = fnTextRange2_MoveEndWhile,
+    .MoveUntil = fnTextRange2_MoveUntil,
+    .MoveStartUntil = fnTextRange2_MoveStartUntil,
+    .MoveEndUntil = fnTextRange2_MoveEndUntil,
+    .FindText = fnTextRange2_FindText,
+    .FindTextStart = fnTextRange2_FindTextStart,
+    .FindTextEnd = fnTextRange2_FindTextEnd,
+    .Delete = fnTextRange2_Delete,
+    .Cut = fnTextRange2_Cut,
+    .Copy = fnTextRange2_Copy,
+    .Paste = fnTextRange2_Paste,
+    .CanPaste = fnTextRange2_CanPaste,
+    .CanEdit = fnTextRange2_CanEdit,
+    .ChangeCase = fnTextRange2_ChangeCase,
+    .GetPoint = fnTextRange2_GetPoint,
+    .SetPoint = fnTextRange2_SetPoint,
+    .ScrollIntoView = fnTextRange2_ScrollIntoView,
+    .GetEmbeddedObject = fnTextRange2_GetEmbeddedObject,
+    .GetFlags = fnTextRange2_GetFlags,
+    .SetFlags = fnTextRange2_SetFlags,
+    .GetType = fnTextRange2_GetType,
+    .MoveLeft = fnTextRange2_MoveLeft,
+    .MoveRight = fnTextRange2_MoveRight,
+    .MoveUp = fnTextRange2_MoveUp,
+    .MoveDown = fnTextRange2_MoveDown,
+    .HomeKey = fnTextRange2_HomeKey,
+    .EndKey = fnTextRange2_EndKey,
+    .TypeText = fnTextRange2_TypeText,
+    .GetCch = fnTextRange2_GetCch,
+    .GetCells = fnTextRange2_GetCells,
+    .GetColumn = fnTextRange2_GetColumn,
+    .GetCount = fnTextRange2_GetCount,
+    .GetDuplicate2 = fnTextRange2_GetDuplicate2,
+    .GetFont2 = fnTextRange2_GetFont2,
+    .SetFont2 = fnTextRange2_SetFont2,
+    .GetFormattedText2 = fnTextRange2_GetFormattedText2,
+    .SetFormattedText2 = fnTextRange2_SetFormattedText2,
+    .GetGravity = fnTextRange2_GetGravity,
+    .SetGravity = fnTextRange2_SetGravity,
+    .GetPara2 = fnTextRange2_GetPara2,
+    .SetPara2 = fnTextRange2_SetPara2,
+    .GetRow = fnTextRange2_GetRow,
+    .GetStartPara = fnTextRange2_GetStartPara,
+    .GetTable = fnTextRange2_GetTable,
+    .GetURL = fnTextRange2_GetURL,
+    .SetURL = fnTextRange2_SetURL,
+    .AddSubrange = fnTextRange2_AddSubrange,
+    .BuildUpMath = fnTextRange2_BuildUpMath,
+    .DeleteSubrange = fnTextRange2_DeleteSubrange,
+    .Find = fnTextRange2_Find,
+    .GetChar2 = fnTextRange2_GetChar2,
+    .GetDropCap = fnTextRange2_GetDropCap,
+    .GetInlineObject = fnTextRange2_GetInlineObject,
+    .GetProperty = fnTextRange2_GetProperty,
+    .GetRect = fnTextRange2_GetRect,
+    .GetSubrange = fnTextRange2_GetSubrange,
+    .GetText2 = fnTextRange2_GetText2,
+    .HexToUnicode = fnTextRange2_HexToUnicode,
+    .InsertTable = fnTextRange2_InsertTable,
+    .Linearize = fnTextRange2_Linearize,
+    .SetActiveSubrange = fnTextRange2_SetActiveSubrange,
+    .SetDropCap = fnTextRange2_SetDropCap,
+    .SetProperty = fnTextRange2_SetProperty,
+    .SetText2 = fnTextRange2_SetText2,
+    .UnicodeToHex = fnTextRange2_UnicodeToHex,
+    .SetInlineObject = fnTextRange2_SetInlineObject,
+    .GetMathFunctionType = fnTextRange2_GetMathFunctionType,
+    .InsertImage = fnTextRange2_InsertImage,
+};
+
+static HRESULT create_text_range2_proxy( ITextRange *base_range, ITextRange2 **range )
+{
+    struct text_range2_proxy *proxy;
+
+    if (!range)
+    {
+        ITextRange_Release( base_range );
+        return E_INVALIDARG;
+    }
+    *range = NULL;
+    proxy = calloc( 1, sizeof(*proxy) );
+    if (!proxy)
+    {
+        ITextRange_Release( base_range );
+        return E_OUTOFMEMORY;
+    }
+    proxy->ITextRange2_iface.lpVtbl = &text_range2_vtbl;
+    proxy->ref = 1;
+    proxy->range = base_range;
+    *range = &proxy->ITextRange2_iface;
+    return S_OK;
+}
+
+static HRESULT WINAPI fnTextDoc2_Range2( ITextDocument2 *iface, LONG active, LONG anchor,
+        ITextRange2 **range )
+{
+    struct text_services *services = impl_from_ITextDocument2( iface );
+    ITextRange *base_range;
+    HRESULT hr;
+
+    if (!range) return E_INVALIDARG;
+    *range = NULL;
+    hr = ITextDocument2Old_Range( &services->ITextDocument2Old_iface, active, anchor, &base_range );
+    if (FAILED(hr)) return hr;
+    return create_text_range2_proxy( base_range, range );
+}
+
+static HRESULT WINAPI fnTextDoc2_RangeFromPoint2( ITextDocument2 *iface, LONG x, LONG y, LONG type,
+        ITextRange2 **range )
+{
+    if (range) *range = NULL;
+    return E_NOTIMPL;
+}
+
+static HRESULT WINAPI fnTextDoc2_ReleaseCallManager( ITextDocument2 *iface, IUnknown *manager )
+{
+    return E_NOTIMPL;
+}
+
+static HRESULT WINAPI fnTextDoc2_SetProperty( ITextDocument2 *iface, LONG type, LONG value )
+{
+    return S_OK;
+}
+
+static HRESULT WINAPI fnTextDoc2_SetTypographyOptions( ITextDocument2 *iface, LONG options, LONG mask )
+{
+    return S_OK;
+}
+
+static HRESULT WINAPI fnTextDoc2_GetMathProperties( ITextDocument2 *iface, LONG *options )
+{
+    if (!options) return E_INVALIDARG;
+    *options = 0;
+    return S_OK;
+}
+
+static HRESULT WINAPI fnTextDoc2_SetMathProperties( ITextDocument2 *iface, LONG options, LONG mask )
+{
+    return S_OK;
+}
+
+static HRESULT WINAPI fnTextDoc2_GetActiveStory( ITextDocument2 *iface, ITextStory **story )
+{
+    if (story) *story = NULL;
+    return E_NOTIMPL;
+}
+
+static HRESULT WINAPI fnTextDoc2_SetActiveStory( ITextDocument2 *iface, ITextStory *story )
+{
+    return E_NOTIMPL;
+}
+
+static HRESULT WINAPI fnTextDoc2_GetMainStory( ITextDocument2 *iface, ITextStory **story )
+{
+    if (story) *story = NULL;
+    return E_NOTIMPL;
+}
+
+static HRESULT WINAPI fnTextDoc2_GetNewStory( ITextDocument2 *iface, ITextStory **story )
+{
+    if (story) *story = NULL;
+    return E_NOTIMPL;
+}
+
+static HRESULT WINAPI fnTextDoc2_GetStory( ITextDocument2 *iface, LONG index, ITextStory **story )
+{
+    if (story) *story = NULL;
+    return E_NOTIMPL;
+}
+
+static const ITextDocument2Vtbl text_doc2_vtbl =
+{
+    fnTextDoc2_QueryInterface,
+    fnTextDoc2_AddRef,
+    fnTextDoc2_Release,
+    fnTextDoc2_GetTypeInfoCount,
+    fnTextDoc2_GetTypeInfo,
+    fnTextDoc2_GetIDsOfNames,
+    fnTextDoc2_Invoke,
+    fnTextDoc2_GetName,
+    fnTextDoc2_GetSelection,
+    fnTextDoc2_GetStoryCount,
+    fnTextDoc2_GetStoryRanges,
+    fnTextDoc2_GetSaved,
+    fnTextDoc2_SetSaved,
+    fnTextDoc2_GetDefaultTabStop,
+    fnTextDoc2_SetDefaultTabStop,
+    fnTextDoc2_New,
+    fnTextDoc2_Open,
+    fnTextDoc2_Save,
+    fnTextDoc2_Freeze,
+    fnTextDoc2_Unfreeze,
+    fnTextDoc2_BeginEditCollection,
+    fnTextDoc2_EndEditCollection,
+    fnTextDoc2_Undo,
+    fnTextDoc2_Redo,
+    fnTextDoc2_Range,
+    fnTextDoc2_RangeFromPoint,
+    fnTextDoc2_GetCaretType,
+    fnTextDoc2_SetCaretType,
+    fnTextDoc2_GetDisplays,
+    fnTextDoc2_GetDocumentFont,
+    fnTextDoc2_SetDocumentFont,
+    fnTextDoc2_GetDocumentPara,
+    fnTextDoc2_SetDocumentPara,
+    fnTextDoc2_GetEastAsianFlags,
+    fnTextDoc2_GetGenerator,
+    fnTextDoc2_SetIMEInProgress,
+    fnTextDoc2_GetNotificationMode,
+    fnTextDoc2_SetNotificationMode,
+    fnTextDoc2_GetSelection2,
+    fnTextDoc2_GetStoryRanges2,
+    fnTextDoc2_GetTypographyOptions,
+    fnTextDoc2_GetVersion,
+    fnTextDoc2_GetWindow,
+    fnTextDoc2_AttachMsgFilter,
+    fnTextDoc2_CheckTextLimit,
+    fnTextDoc2_GetCallManager,
+    fnTextDoc2_GetClientRect,
+    fnTextDoc2_GetEffectColor,
+    fnTextDoc2_GetImmContext,
+    fnTextDoc2_GetPreferredFont,
+    fnTextDoc2_GetProperty,
+    fnTextDoc2_GetStrings,
+    fnTextDoc2_Notify,
+    fnTextDoc2_Range2,
+    fnTextDoc2_RangeFromPoint2,
+    fnTextDoc2_ReleaseCallManager,
+    fnTextDoc2_ReleaseImmContext,
+    fnTextDoc2_SetEffectColor,
+    fnTextDoc2_SetProperty,
+    fnTextDoc2_SetTypographyOptions,
+    fnTextDoc2_SysBeep,
+    fnTextDoc2_Update,
+    fnTextDoc2_UpdateWindow,
+    fnTextDoc2_GetMathProperties,
+    fnTextDoc2_SetMathProperties,
+    fnTextDoc2_GetActiveStory,
+    fnTextDoc2_SetActiveStory,
+    fnTextDoc2_GetMainStory,
+    fnTextDoc2_GetNewStory,
+    fnTextDoc2_GetStory,
 };
 
 HRESULT create_text_services( IUnknown *outer, ITextHost *text_host, IUnknown **unk, BOOL emulate_10 )
@@ -586,9 +1426,10 @@ HRESULT create_text_services( IUnknown *outer, ITextHost *text_host, IUnknown **
     if (services == NULL) return E_OUTOFMEMORY;
     services->ref = 1;
     services->IUnknown_inner.lpVtbl = &textservices_inner_vtbl;
-    services->ITextServices_iface.lpVtbl = &textservices_vtbl;
+    services->ITextServices_iface.lpVtbl = &textservices_vtbl.base;
     services->IRichEditOle_iface.lpVtbl = &re_ole_vtbl;
     services->ITextDocument2Old_iface.lpVtbl = &text_doc2old_vtbl;
+    services->ITextDocument2_iface.lpVtbl = &text_doc2_vtbl;
     services->editor = ME_MakeEditor( text_host, emulate_10 );
     services->editor->richole = &services->IRichEditOle_iface;
 

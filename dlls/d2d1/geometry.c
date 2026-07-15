@@ -29,6 +29,11 @@ WINE_DEFAULT_DEBUG_CHANNEL(d2d);
 
 #define D2D_FP_EPS (1.0f / (1 << FLT_MANT_DIG))
 
+/* Office can submit a small path whose overlapping Bezier control triangles
+ * keep producing more overlaps after every split.  Letting that pathological
+ * case grow without a bound can block the UI thread for tens of seconds. */
+#define D2D_BEZIER_OVERLAP_SPLIT_LIMIT 2048
+
 static const D2D1_MATRIX_3X2_F identity =
 {{{
     1.0f, 0.0f,
@@ -3632,7 +3637,7 @@ static HRESULT d2d_geometry_resolve_beziers(struct d2d_geometry *geometry)
     struct d2d_curve_vertex *b;
     const D2D1_POINT_2F *p[3];
     struct d2d_figure *figure;
-    size_t bezier_idx, i;
+    size_t bezier_idx, i, split_count = 0;
 
     if (!d2d_geometry_get_first_bezier_segment_idx(geometry, &idx_p))
         return S_OK;
@@ -3649,6 +3654,7 @@ static HRESULT d2d_geometry_resolve_beziers(struct d2d_geometry *geometry)
                 {
                     if (!d2d_geometry_split_bezier(geometry, &idx_q))
                         return E_OUTOFMEMORY;
+                    ++split_count;
                     if (idx_p.figure_idx == idx_q.figure_idx)
                     {
                         ++idx_p.vertex_idx;
@@ -3659,12 +3665,21 @@ static HRESULT d2d_geometry_resolve_beziers(struct d2d_geometry *geometry)
                 {
                     if (!d2d_geometry_split_bezier(geometry, &idx_p))
                         return E_OUTOFMEMORY;
+                    ++split_count;
+                }
+
+                if (split_count >= D2D_BEZIER_OVERLAP_SPLIT_LIMIT)
+                {
+                    WARN("Stopping pathological overlap splitting at %u splits.\n",
+                            D2D_BEZIER_OVERLAP_SPLIT_LIMIT);
+                    goto splitting_done;
                 }
             }
             d2d_geometry_get_next_bezier_segment_idx(geometry, &idx_q);
         }
     }
 
+splitting_done:
     for (i = 0; i < geometry->u.path.figure_count; ++i)
     {
         if (geometry->u.path.figures[i].flags & D2D_FIGURE_FLAG_HOLLOW)

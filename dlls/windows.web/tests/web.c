@@ -30,6 +30,8 @@
 #include "windows.foundation.h"
 #define WIDL_using_Windows_Data_Json
 #include "windows.data.json.h"
+#define WIDL_using_Windows_Security_Authorization_AppCapabilityAccess
+#include "windows.security.authorization.appcapabilityaccess.h"
 
 #include "wine/test.h"
 
@@ -56,9 +58,12 @@ static void test_JsonArrayStatics(void)
     IJsonArray *child_array = (void *)0xdeadbeef;
     IJsonArray *json_array = (void *)0xdeadbeef;
     IJsonValue *json_value = (void *)0xdeadbeef;
+    IVector_IJsonValue *json_vector = (void *)0xdeadbeef;
     BOOLEAN child_boolean;
     HSTRING child_string;
+    HSTRING serialized = NULL;
     DOUBLE child_number;
+    UINT32 size;
     HSTRING str = NULL;
     HRESULT hr;
     LONG ref;
@@ -106,6 +111,22 @@ static void test_JsonArrayStatics(void)
     ok( hr == S_OK, "got hr %#lx.\n", hr );
 
     check_interface( inspectable, &IID_IAgileObject );
+
+    hr = IJsonArray_QueryInterface( json_array, &IID_IVector_IJsonValue, (void **)&json_vector );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    hr = IVector_IJsonValue_get_Size( json_vector, &size );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    ok( !size, "got size %u.\n", size );
+    IVector_IJsonValue_Release( json_vector );
+
+    hr = IJsonArray_QueryInterface( json_array, &IID_IJsonValue, (void **)&json_value );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    hr = IJsonValue_Stringify( json_value, &serialized );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    ok( !wcscmp( WindowsGetStringRawBuffer( serialized, NULL ), L"[]" ),
+        "got %s.\n", wine_dbgstr_hstring( serialized ) );
+    WindowsDeleteString( serialized );
+    IJsonValue_Release( json_value );
 
     hr = IJsonArray_GetObjectAt( json_array, 0, NULL );
     ok( hr == E_INVALIDARG, "got hr %#lx.\n", hr );
@@ -244,13 +265,16 @@ static void test_JsonObjectStatics(void)
     static const WCHAR *json_value_statics_name = L"Windows.Data.Json.JsonValue";
     static const WCHAR *json_object_name = L"Windows.Data.Json.JsonObject";
     IJsonValueStatics *json_value_statics = (void *)0xdeadbeef;
+    IJsonObjectStatics *json_object_statics = (void *)0xdeadbeef;
     IActivationFactory *factory = (void *)0xdeadbeef;
     IInspectable *inspectable = (void *)0xdeadbeef;
     IJsonObject *child_object = (void *)0xdeadbeef;
     IJsonObject *json_object = (void *)0xdeadbeef;
+    IJsonObject *parsed_object = (void *)0xdeadbeef;
     IJsonArray *child_array = (void *)0xdeadbeef;
     IJsonValue *child_value = (void *)0xdeadbeef;
     BOOLEAN child_boolean;
+    boolean succeeded;
     HSTRING child_string;
     DOUBLE child_number;
     HSTRING str = NULL;
@@ -286,6 +310,27 @@ static void test_JsonObjectStatics(void)
     check_interface( factory, &IID_IUnknown );
     check_interface( factory, &IID_IInspectable );
     check_interface( factory, &IID_IAgileObject );
+
+    hr = IActivationFactory_QueryInterface( factory, &IID_IJsonObjectStatics,
+                                            (void **)&json_object_statics );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+
+    hr = WindowsCreateString( L"{\"key\":1}", wcslen( L"{\"key\":1}" ), &str );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    hr = IJsonObjectStatics_Parse( json_object_statics, str, &parsed_object );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    if (SUCCEEDED(hr)) IJsonObject_Release( parsed_object );
+    WindowsDeleteString( str );
+
+    hr = WindowsCreateString( L"[]", wcslen( L"[]" ), &str );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    parsed_object = (void *)0xdeadbeef;
+    succeeded = TRUE;
+    hr = IJsonObjectStatics_TryParse( json_object_statics, str, &parsed_object, &succeeded );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    ok( !succeeded, "expected parse failure.\n" );
+    ok( !parsed_object, "got object %p.\n", parsed_object );
+    WindowsDeleteString( str );
 
     hr = IActivationFactory_QueryInterface( factory, &IID_IJsonObject, (void **)&json_object );
     ok( hr == E_NOINTERFACE, "got hr %#lx.\n", hr );
@@ -472,6 +517,7 @@ static void test_JsonObjectStatics(void)
     ok( hr == S_OK, "got hr %#lx.\n", hr );
 
     IJsonObject_Release( json_object );
+    IJsonObjectStatics_Release( json_object_statics );
     IJsonValueStatics_Release( json_value_statics );
     ref = IActivationFactory_Release( factory );
     ok( ref == 1, "got ref %ld.\n", ref );
@@ -622,7 +668,7 @@ static void test_JsonValueStatics(void)
     IActivationFactory *factory = (void *)0xdeadbeef;
     IJsonValue *json_value = (void *)0xdeadbeef;
     JsonValueType json_value_type;
-    HSTRING str = NULL;
+    HSTRING serialized = NULL, str = NULL;
     const WCHAR *json;
     HRESULT hr;
     LONG ref;
@@ -776,6 +822,22 @@ static void test_JsonValueStatics(void)
             "}";
     check_json( json_value_statics, json, JsonValueType_Object, TRUE );
 
+    json = L"[\"Wine\",\"Linux\",2,true]";
+    hr = WindowsCreateString( json, wcslen( json ), &str );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    hr = IJsonValueStatics_Parse( json_value_statics, str, &json_value );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    if (SUCCEEDED(hr))
+    {
+        hr = IJsonValue_Stringify( json_value, &serialized );
+        ok( hr == S_OK, "got hr %#lx.\n", hr );
+        ok( !wcscmp( WindowsGetStringRawBuffer( serialized, NULL ), json ),
+            "got %s.\n", wine_dbgstr_hstring( serialized ) );
+        WindowsDeleteString( serialized );
+        IJsonValue_Release( json_value );
+    }
+    WindowsDeleteString( str );
+
     /* Invalid JSON */
 
     json = L"null";
@@ -842,6 +904,52 @@ static void test_JsonValueStatics(void)
     ok( ref == 1, "got ref %ld.\n", ref );
 }
 
+static void test_AppCapability(void)
+{
+    static const WCHAR class_name[] =
+        L"Windows.Security.Authorization.AppCapabilityAccess.AppCapability";
+    IAppCapabilityStatics *statics = (void *)0xdeadbeef;
+    IAppCapability *capability = (void *)0xdeadbeef;
+    AppCapabilityAccessStatus status;
+    HSTRING class = NULL, name = NULL, returned_name = NULL;
+    HRESULT hr;
+    int result;
+
+    hr = WindowsCreateString( class_name, ARRAY_SIZE(class_name) - 1, &class );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    hr = RoGetActivationFactory( class, &IID_IAppCapabilityStatics, (void **)&statics );
+    WindowsDeleteString( class );
+    if (hr == REGDB_E_CLASSNOTREG)
+    {
+        win_skip( "%s runtimeclass not registered, skipping tests.\n", wine_dbgstr_w( class_name ) );
+        return;
+    }
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    if (FAILED(hr)) return;
+
+    hr = WindowsCreateString( L"location", 8, &name );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    hr = IAppCapabilityStatics_Create( statics, name, &capability );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    if (SUCCEEDED(hr))
+    {
+        hr = IAppCapability_get_CapabilityName( capability, &returned_name );
+        ok( hr == S_OK, "got hr %#lx.\n", hr );
+        hr = WindowsCompareStringOrdinal( name, returned_name, &result );
+        ok( hr == S_OK, "got hr %#lx.\n", hr );
+        ok( !result, "got capability name %s.\n", wine_dbgstr_hstring( returned_name ) );
+        WindowsDeleteString( returned_name );
+
+        hr = IAppCapability_CheckAccess( capability, &status );
+        ok( hr == S_OK, "got hr %#lx.\n", hr );
+        ok( status >= AppCapabilityAccessStatus_DeniedBySystem &&
+            status <= AppCapabilityAccessStatus_Allowed, "got status %u.\n", status );
+        IAppCapability_Release( capability );
+    }
+    WindowsDeleteString( name );
+    IAppCapabilityStatics_Release( statics );
+}
+
 START_TEST(web)
 {
     HRESULT hr;
@@ -852,6 +960,7 @@ START_TEST(web)
     test_JsonArrayStatics();
     test_JsonObjectStatics();
     test_JsonValueStatics();
+    test_AppCapability();
 
     RoUninitialize();
 }

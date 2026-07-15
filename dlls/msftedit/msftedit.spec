@@ -12,3 +12,4 @@
 13 stub RichEditWndProc
 14 stub RichListBoxWndProc
 15 stub RichComboBoxWndProc
+25 extern IID_ITextServices2 riched20.IID_ITextServices2

@@ -2,6 +2,7 @@ MODULE  = windows.web.dll
 IMPORTS = combase
 
 SOURCES = \
+	app_capability.c \
 	classes.idl \
 	json_array.c \
 	json_object.c \

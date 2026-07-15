@@ -709,7 +709,27 @@ void window_surface_set_clip( struct window_surface *surface, HRGN clip_region )
 
 void window_surface_set_shape( struct window_surface *surface, HRGN shape_region )
 {
+    RECT box, window_rect;
+    BOOL full_window_region = FALSE;
+
+    if (shape_region && surface != &dummy_surface &&
+        !(NtUserGetWindowLongW( surface->hwnd, GWL_EXSTYLE ) & WS_EX_LAYERED) &&
+        NtGdiGetRgnBox( shape_region, &box ) == SIMPLEREGION &&
+        get_window_rect( surface->hwnd, &window_rect, get_thread_dpi() ) &&
+        window_rect.right > window_rect.left && window_rect.bottom > window_rect.top)
+    {
+        full_window_region = box.left <= 0 && box.top <= 0 &&
+                             box.right >= window_rect.right - window_rect.left &&
+                             box.bottom >= window_rect.bottom - window_rect.top;
+        if (getenv( "WINE_FULL_REGION_DIAG" ))
+            WARN( "OFFICE_SURFACE_REGION hwnd %p box %s window %s full %u.\n", surface->hwnd,
+                  wine_dbgstr_rect( &box ), wine_dbgstr_rect( &window_rect ), full_window_region );
+    }
+
     window_surface_lock( surface );
+
+    if (full_window_region && !surface->alpha_mask && surface->color_key == CLR_INVALID)
+        shape_region = 0;
 
     if (!shape_region && surface->shape_region)
     {

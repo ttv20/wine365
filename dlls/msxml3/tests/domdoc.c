@@ -4758,6 +4758,11 @@ static void test_IXMLDOMDocument2(void)
     ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
     VariantClear(&var);
 
+    V_VT(&var) = VT_BSTR;
+    V_BSTR(&var) = NULL;
+    hr = IXMLDOMDocument2_setProperty(doc2, _bstr_("SelectionNamespaces"), var);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+
     V_VT(&var) = VT_I2;
     V_I2(&var) = 0;
     hr = IXMLDOMDocument2_setProperty(doc2, _bstr_("SelectionNamespaces"), var);

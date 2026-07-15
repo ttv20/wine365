@@ -142,7 +142,6 @@ void wp_fractional_scale_handle_scale(void* user_data,
                                       uint32_t scale_fixed)
 {
     struct wayland_win_data *data;
-    struct wayland_client_surface *client;
     struct wayland_surface *surface;
     double scale = scale_fixed / 120.0;
     HWND hwnd = user_data;
@@ -158,9 +157,8 @@ void wp_fractional_scale_handle_scale(void* user_data,
 
     surface->window.scale = scale;
 
-    /* reattach the client surface as its rect has changed */
-    if ((client = data->client_surface))
-        wayland_client_surface_attach(client, client->toplevel);
+    /* reattach client surfaces as their rects have changed */
+    update_client_surfaces(hwnd);
 
     /* the subsurface rect has changed */
     if (surface->role == WAYLAND_SURFACE_ROLE_SUBSURFACE)
@@ -367,6 +365,27 @@ void wayland_surface_make_toplevel(struct wayland_surface *surface)
 err:
     wayland_surface_clear_role(surface);
     ERR("Failed to assign toplevel role to wayland surface\n");
+}
+
+/**********************************************************************
+ *          wayland_surface_set_toplevel_parent
+ *
+ * Mirrors Win32 owned-window relationships for managed dialogs. This keeps
+ * transient Office windows above their owning document without forcing them
+ * into the subsurface positioning path used by captionless popups.
+ */
+void wayland_surface_set_toplevel_parent(struct wayland_surface *surface,
+                                         struct wayland_surface *parent)
+{
+    struct xdg_toplevel *parent_toplevel = NULL;
+
+    if (!wayland_surface_is_toplevel(surface)) return;
+    if (parent && parent != surface && wayland_surface_is_toplevel(parent))
+        parent_toplevel = parent->xdg_toplevel;
+
+    TRACE("surface=%p hwnd=%p parent=%p parent_hwnd=%p\n", surface, surface->hwnd,
+          parent, parent ? parent->hwnd : NULL);
+    xdg_toplevel_set_parent(surface->xdg_toplevel, parent_toplevel);
 }
 
 /**********************************************************************
@@ -782,6 +801,7 @@ static void wayland_surface_reconfigure_subsurface(struct wayland_surface *surfa
             wl_subsurface_place_above(surface->wl_subsurface, owner_data->client_surface->wl_surface);
         else
             wl_subsurface_place_above(surface->wl_subsurface, owner_surface->wl_surface);
+        wayland_win_data_restack_clients_below(surface->owner_hwnd, surface->wl_surface);
         wl_surface_commit(owner_surface->wl_surface);
 
         memset(&surface->processing, 0, sizeof(surface->processing));
@@ -1172,7 +1192,7 @@ static void wayland_client_surface_detach(struct client_surface *client)
     if ((data = wayland_win_data_get(client->hwnd)))
     {
         if (data->client_surface == surface) data->client_surface = NULL;
-        wayland_client_surface_attach(surface, NULL);
+        wayland_client_surface_attach(surface, NULL, NULL);
         wayland_win_data_release(data);
     }
 }
@@ -1180,15 +1200,22 @@ static void wayland_client_surface_detach(struct client_surface *client)
 static void wayland_client_surface_update(struct client_surface *client)
 {
     struct wayland_client_surface *surface = impl_from_client_surface(client);
-    HWND hwnd = client->hwnd, toplevel = NtUserGetAncestor(hwnd, GA_ROOT);
+    HWND hwnd = client->hwnd, toplevel = client->toplevel;
     struct wayland_win_data *data;
+    BOOL visible = toplevel && NtUserIsWindowVisible(hwnd);
+    RECT client_rect;
+
+    TRACE("%s\n", debugstr_client_surface(client));
+
+    if (visible)
+        wayland_client_surface_get_rect(surface, toplevel, &client_rect);
 
     if (!(data = wayland_win_data_get(hwnd))) return;
 
-    if (toplevel && NtUserIsWindowVisible(hwnd))
-        wayland_client_surface_attach(surface, toplevel);
+    if (visible)
+        wayland_client_surface_attach(surface, toplevel, &client_rect);
     else
-        wayland_client_surface_attach(surface, NULL);
+        wayland_client_surface_attach(surface, NULL, NULL);
 
     wayland_win_data_release(data);
 }
@@ -1196,7 +1223,10 @@ static void wayland_client_surface_update(struct client_surface *client)
 static void wayland_client_surface_present(struct client_surface *client, HDC hdc)
 {
     struct wayland_client_surface *surface = impl_from_client_surface(client);
-    HWND hwnd = client->hwnd, toplevel = NtUserGetAncestor(hwnd, GA_ROOT);
+    HWND hwnd = client->hwnd, toplevel = client->toplevel;
+
+    WARN("WORD-WAYLAND-DIAG present client %p hwnd %p tracked top %p attached top %p subsurface %p.\n",
+            surface, hwnd, toplevel, surface->toplevel, surface->wl_subsurface);
     ensure_window_surface_contents(toplevel);
     set_client_surface(hwnd, surface);
 }
@@ -1257,12 +1287,25 @@ err:
     return NULL;
 }
 
-void wayland_client_surface_attach(struct wayland_client_surface *client, HWND toplevel)
+void wayland_client_surface_get_rect(struct wayland_client_surface *client, HWND toplevel,
+                                     RECT *client_rect)
+{
+    HWND hwnd = client->client.hwnd;
+    UINT dpi = NtUserGetWinMonitorDpi(hwnd, MDT_RAW_DPI);
+
+    NtUserGetClientRect(hwnd, client_rect, dpi);
+    NtUserMapWindowPoints(hwnd, toplevel, (POINT *)client_rect, 2, dpi);
+}
+
+void wayland_client_surface_attach(struct wayland_client_surface *client, HWND toplevel,
+                                   const RECT *client_rect)
 {
     struct wayland_win_data *toplevel_data;
     struct wayland_surface *surface;
     HWND hwnd = client->client.hwnd;
-    RECT client_rect;
+
+    WARN("WORD-WAYLAND-DIAG attach client %p hwnd %p old top %p new top %p subsurface %p.\n",
+            client, hwnd, client->toplevel, toplevel, client->wl_subsurface);
 
     if (!toplevel)
     {
@@ -1278,13 +1321,13 @@ void wayland_client_surface_attach(struct wayland_client_surface *client, HWND t
 
     if (!(toplevel_data = wayland_win_data_get_nolock(toplevel)) || !(surface = toplevel_data->wayland_surface))
     {
-        wayland_client_surface_attach(client, NULL);
+        wayland_client_surface_attach(client, NULL, NULL);
         return;
     }
 
     if (client->toplevel != toplevel)
     {
-        wayland_client_surface_attach(client, NULL);
+        wayland_client_surface_attach(client, NULL, NULL);
 
         client->wl_subsurface =
             wl_subcompositor_get_subsurface(process_wayland.wl_subcompositor,
@@ -1301,11 +1344,12 @@ void wayland_client_surface_attach(struct wayland_client_surface *client, HWND t
         client->toplevel = toplevel;
     }
 
-    NtUserGetClientRect(hwnd, &client_rect, NtUserGetWinMonitorDpi(hwnd, MDT_RAW_DPI));
-    NtUserMapWindowPoints(hwnd, toplevel, (POINT *)&client_rect, 2, NtUserGetWinMonitorDpi(hwnd, MDT_RAW_DPI));
-
-    wayland_surface_reconfigure_client(surface, client, &client_rect);
-    /* Commit to apply subsurface positioning. */
+    wayland_surface_reconfigure_client(surface, client, client_rect);
+    wayland_win_data_restack_client_below_popups(toplevel, client);
+    /* Recommit the client surface in case destroying its previous subsurface
+     * role unmapped an existing EGL buffer. Then apply the new subsurface
+     * position atomically through the parent. */
+    wl_surface_commit(client->wl_surface);
     wl_surface_commit(surface->wl_surface);
 }
 

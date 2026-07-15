@@ -308,6 +308,7 @@ void detach_client_surfaces( HWND hwnd )
         client_surface_add_ref( surface );
 
         surface->funcs->detach( surface );
+        surface->toplevel = NULL;
         surface->hwnd = NULL;
     }
 
@@ -320,7 +321,14 @@ void detach_client_surfaces( HWND hwnd )
     }
 }
 
-static void update_client_surfaces( HWND hwnd )
+static void client_surface_update_locked( struct client_surface *surface )
+{
+    surface->toplevel = NtUserGetAncestor( surface->hwnd, GA_ROOT );
+    surface->funcs->update( surface );
+    InterlockedExchange( &surface->updated, 1 );
+}
+
+void update_client_surfaces( HWND hwnd )
 {
     struct client_surface *surface, *next;
 
@@ -329,8 +337,7 @@ static void update_client_surfaces( HWND hwnd )
     LIST_FOR_EACH_ENTRY_SAFE( surface, next, &client_surfaces, struct client_surface, entry )
     {
         if (NtUserGetAncestor( surface->hwnd, GA_ROOT ) != hwnd) continue;
-        surface->funcs->update( surface );
-        InterlockedExchange( &surface->updated, 1 );
+        client_surface_update_locked( surface );
     }
 
     pthread_mutex_unlock( &surfaces_lock );
@@ -338,12 +345,14 @@ static void update_client_surfaces( HWND hwnd )
 
 void *client_surface_create( UINT size, const struct client_surface_funcs *funcs, HWND hwnd )
 {
+    HWND toplevel = NtUserGetAncestor( hwnd, GA_ROOT );
     struct client_surface *surface;
 
     if (!(surface = calloc( 1, size ))) return NULL;
     surface->funcs = funcs;
     surface->ref = 1;
     surface->hwnd = hwnd;
+    surface->toplevel = toplevel;
     list_init( &surface->entry );
 
     TRACE( "created %s\n", debugstr_client_surface( surface ) );
@@ -394,7 +403,7 @@ void client_surface_present( struct client_surface *surface )
 void client_surface_update( struct client_surface *surface )
 {
     pthread_mutex_lock( &surfaces_lock );
-    if (surface->hwnd) surface->funcs->update( surface );
+    if (surface->hwnd) client_surface_update_locked( surface );
     pthread_mutex_unlock( &surfaces_lock );
 }
 
@@ -404,7 +413,7 @@ void add_window_client_surface( HWND hwnd, struct client_surface *surface )
 
     surface->hwnd = hwnd;
     list_add_tail( &client_surfaces, &surface->entry );
-    surface->funcs->update( surface );
+    client_surface_update_locked( surface );
 
     pthread_mutex_unlock( &surfaces_lock );
 }
@@ -1953,6 +1962,72 @@ static NTSTATUS get_window_region( HWND hwnd, BOOL surface, HRGN *region, RECT *
     return status;
 }
 
+static BOOL is_full_window_region( HRGN region, const RECT *window_rect )
+{
+    HRGN full_region;
+    RECT box;
+    int type;
+    BOOL equal;
+
+    if (window_rect->right <= window_rect->left || window_rect->bottom <= window_rect->top)
+        return FALSE;
+    if (!(full_region = NtGdiCreateRectRgn( 0, 0, window_rect->right - window_rect->left,
+                                            window_rect->bottom - window_rect->top )))
+        return FALSE;
+    equal = NtGdiEqualRgn( region, full_region );
+    type = NtGdiGetRgnBox( region, &box );
+    if (getenv( "WINE_FULL_REGION_DIAG" ))
+        WARN( "OFFICE_FULL_REGION type %d box %s window %s equal %u.\n", type,
+              wine_dbgstr_rect( &box ), wine_dbgstr_rect( window_rect ), equal );
+    NtGdiDeleteObjectApp( full_region );
+    return equal;
+}
+
+static BOOL is_office_net_ui_tool_window( HWND hwnd )
+{
+    static const WCHAR net_ui_tool_window[] =
+        {'N','e','t',' ','U','I',' ','T','o','o','l',' ','W','i','n','d','o','w',0};
+    WCHAR buffer[64];
+    UNICODE_STRING name = {0, sizeof(buffer), buffer};
+    INT len;
+
+    if ((len = NtUserGetClassName( hwnd, FALSE, &name )) <= 0 || len >= ARRAY_SIZE(buffer))
+        return FALSE;
+    buffer[len] = 0;
+    return !wcscmp( buffer, net_ui_tool_window );
+}
+
+static HWND office_net_ui_yield_window;
+
+static void update_office_net_ui_yield_throttle( HWND hwnd, BOOL visible )
+{
+    RECT rect;
+    BOOL gallery;
+
+    if (!getenv( "WINE_NETUI_INPUT_THROTTLE" ) ||
+        !is_office_net_ui_tool_window( hwnd ))
+        return;
+
+    if (visible)
+    {
+        /* Cover Shapes/Table galleries and smaller color/Shape Fill flyouts
+         * (Office "Net UI Tool Window"), but skip tiny tooltips. */
+        gallery = get_window_rect( hwnd, &rect, get_thread_dpi() ) &&
+                  rect.right - rect.left >= 80 && rect.bottom - rect.top >= 80 &&
+                  rect.right - rect.left <= 900 && rect.bottom - rect.top <= 1000;
+        if (gallery)
+        {
+            office_net_ui_yield_window = hwnd;
+            setenv( "WINE_NETUI_YIELD_ACTIVE", "1", TRUE );
+        }
+    }
+    else if (hwnd == office_net_ui_yield_window)
+    {
+        office_net_ui_yield_window = 0;
+        unsetenv( "WINE_NETUI_YIELD_ACTIVE" );
+    }
+}
+
 /***********************************************************************
  *           update_surface_region
  */
@@ -1968,10 +2043,18 @@ static void update_surface_region( HWND hwnd )
     if (get_window_region( hwnd, FALSE, &shape, &visible )) goto done;
     if (shape)
     {
-        region = NtGdiCreateRectRgn( 0, 0, visible.right - visible.left, visible.bottom - visible.top );
-        NtGdiCombineRgn( shape, shape, region, RGN_AND );
-        if (win->dwExStyle & WS_EX_LAYOUTRTL) NtUserMirrorRgn( hwnd, shape );
-        NtGdiDeleteObjectApp( region );
+        if (is_full_window_region( shape, &win->rects.window ))
+        {
+            NtGdiDeleteObjectApp( shape );
+            shape = 0;
+        }
+        else
+        {
+            region = NtGdiCreateRectRgn( 0, 0, visible.right - visible.left, visible.bottom - visible.top );
+            NtGdiCombineRgn( shape, shape, region, RGN_AND );
+            if (win->dwExStyle & WS_EX_LAYOUTRTL) NtUserMirrorRgn( hwnd, shape );
+            NtGdiDeleteObjectApp( region );
+        }
     }
     window_surface_set_shape( win->surface, shape );
 
@@ -2084,7 +2167,12 @@ static struct window_surface *get_window_surface( HWND hwnd, UINT swp_flags, BOO
     else monitor_dpi_from_rect( rects->window, get_thread_dpi(), &raw_dpi );
 
     if (get_window_region( hwnd, FALSE, &shape, &dummy )) shaped = FALSE;
-    else if ((shaped = !!shape)) NtGdiDeleteObjectApp( shape );
+    else if (shape)
+    {
+        shaped = !is_full_window_region( shape, &rects->window );
+        NtGdiDeleteObjectApp( shape );
+    }
+    else shaped = FALSE;
 
     if (!get_present_rect( hwnd, &rects->visible, get_thread_dpi() )) rects->visible = rects->window;
     if (is_child) monitor_rects = map_dpi_window_rects( *rects, get_thread_dpi(), raw_dpi );
@@ -2419,12 +2507,29 @@ int WINAPI NtUserGetWindowRgnEx( HWND hwnd, HRGN hrgn, UINT unk )
 int WINAPI NtUserSetWindowRgn( HWND hwnd, HRGN hrgn, BOOL redraw )
 {
     static const RECT empty_rect;
+    BOOL redundant_surface_region = FALSE;
     BOOL ret;
 
     if (hrgn)
     {
+        RECT box, window_rect;
         RGNDATA *data;
         DWORD size;
+
+        if (!(NtUserGetWindowLongW( hwnd, GWL_EXSTYLE ) & WS_EX_LAYERED) &&
+            NtGdiGetRgnBox( hrgn, &box ) == SIMPLEREGION &&
+            get_window_rect( hwnd, &window_rect, get_thread_dpi() ) &&
+            window_rect.right > window_rect.left && window_rect.bottom > window_rect.top)
+        {
+            redundant_surface_region = box.left <= 0 && box.top <= 0 &&
+                                       box.right >= window_rect.right - window_rect.left &&
+                                       box.bottom >= window_rect.bottom - window_rect.top &&
+                                       is_office_net_ui_tool_window( hwnd );
+            if (getenv( "WINE_FULL_REGION_DIAG" ))
+                WARN( "OFFICE_SET_REGION hwnd %p box %s window %s redundant %u.\n", hwnd,
+                      wine_dbgstr_rect( &box ), wine_dbgstr_rect( &window_rect ),
+                      redundant_surface_region );
+        }
 
         if (!(size = NtGdiGetRegionData( hrgn, 0, NULL ))) return FALSE;
         if (!(data = malloc( size ))) return FALSE;
@@ -2436,11 +2541,14 @@ int WINAPI NtUserSetWindowRgn( HWND hwnd, HRGN hrgn, BOOL redraw )
         SERVER_START_REQ( set_window_region )
         {
             req->window = wine_server_user_handle( hwnd );
-            req->redraw = redraw != 0;
-            if (data->rdh.nCount)
-                wine_server_add_data( req, data->Buffer, data->rdh.nCount * sizeof(RECT) );
-            else
-                wine_server_add_data( req, &empty_rect, sizeof(empty_rect) );
+            req->redraw = redraw != 0 || redundant_surface_region;
+            if (!redundant_surface_region)
+            {
+                if (data->rdh.nCount)
+                    wine_server_add_data( req, data->Buffer, data->rdh.nCount * sizeof(RECT) );
+                else
+                    wine_server_add_data( req, &empty_rect, sizeof(empty_rect) );
+            }
             ret = !wine_server_call_err( req );
         }
         SERVER_END_REQ;
@@ -2464,11 +2572,12 @@ int WINAPI NtUserSetWindowRgn( HWND hwnd, HRGN hrgn, BOOL redraw )
         UINT raw_dpi;
         HRGN monitor_hrgn;
 
-        if (!redraw) swp_flags |= SWP_NOREDRAW;
+        if (!redraw && !redundant_surface_region) swp_flags |= SWP_NOREDRAW;
 
         get_win_monitor_dpi( hwnd, &raw_dpi );
-        monitor_hrgn = map_dpi_region( hrgn, get_thread_dpi(), raw_dpi );
-        user_driver->pSetWindowRgn( hwnd, monitor_hrgn, redraw );
+        monitor_hrgn = map_dpi_region( redundant_surface_region ? 0 : hrgn,
+                                      get_thread_dpi(), raw_dpi );
+        user_driver->pSetWindowRgn( hwnd, monitor_hrgn, redraw || redundant_surface_region );
         if (monitor_hrgn) NtGdiDeleteObjectApp( monitor_hrgn );
 
         NtUserSetWindowPos( hwnd, 0, 0, 0, 0, 0, swp_flags );
@@ -3999,6 +4108,15 @@ BOOL set_window_pos( WINDOWPOS *winpos, int parent_x, int parent_y )
     if ((winpos->flags & (SWP_NOSIZE|SWP_NOMOVE|SWP_FRAMECHANGED)) != (SWP_NOSIZE|SWP_NOMOVE))
         NtUserNotifyWinEvent( EVENT_OBJECT_LOCATIONCHANGE, winpos->hwnd, OBJID_WINDOW, 0 );
 
+    if (orig_flags & SWP_SHOWWINDOW)
+    {
+        update_office_net_ui_yield_throttle( winpos->hwnd, TRUE );
+        if (is_office_net_ui_tool_window( winpos->hwnd ))
+            NtUserPostMessage( winpos->hwnd, WM_WINE_REDRAWWINDOW, 0, 0 );
+    }
+    else if (orig_flags & SWP_HIDEWINDOW)
+        update_office_net_ui_yield_throttle( winpos->hwnd, FALSE );
+
     ret = TRUE;
 done:
     set_thread_dpi_awareness_context( context );
@@ -4854,6 +4972,12 @@ static BOOL show_window( HWND hwnd, INT cmd )
         NtUserSetWindowPos( hwnd, HWND_TOP, newPos.left, newPos.top,
                             newPos.right - newPos.left, newPos.bottom - newPos.top, swp );
 
+    update_office_net_ui_yield_throttle( hwnd, show_flag );
+
+    if (!was_visible && show_flag && is_office_net_ui_tool_window( hwnd ))
+        NtUserRedrawWindow( hwnd, 0, 0, RDW_INVALIDATE | RDW_ERASE | RDW_FRAME |
+                           RDW_INTERNALPAINT | RDW_UPDATENOW | RDW_ALLCHILDREN );
+
     new_style = get_window_long( hwnd, GWL_STYLE );
     if (((style ^ new_style) & WS_MINIMIZE) != 0)
     {
@@ -5236,6 +5360,7 @@ LRESULT destroy_window( HWND hwnd )
 
     TRACE( "%p\n", hwnd );
 
+    update_office_net_ui_yield_throttle( hwnd, FALSE );
     unregister_imm_window( hwnd );
 
     /* free child windows */

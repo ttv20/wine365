@@ -480,6 +480,7 @@ struct text_services
     ITextServices ITextServices_iface;
     IRichEditOle IRichEditOle_iface;
     ITextDocument2Old ITextDocument2Old_iface;
+    ITextDocument2 ITextDocument2_iface;
     IUnknown *outer_unk;
     LONG ref;
     ME_TextEditor *editor;

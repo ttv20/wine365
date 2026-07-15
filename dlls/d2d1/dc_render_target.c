@@ -30,8 +30,10 @@ static HRESULT d2d_dc_render_target_present(IUnknown *outer_unknown)
 {
     struct d2d_dc_render_target *render_target = impl_from_IUnknown(outer_unknown);
     const RECT *dst_rect = &render_target->dst_rect;
+    BOOL diag = GetEnvironmentVariableW(L"WINE_D2D_DC_DIAG", NULL, 0) != 0;
     RECT empty_rect;
     HDC src_hdc;
+    BOOL blit_ret;
     HRESULT hr;
 
     if (!render_target->hdc)
@@ -43,8 +45,12 @@ static HRESULT d2d_dc_render_target_present(IUnknown *outer_unknown)
         return S_OK;
     }
 
-    BitBlt(render_target->hdc, dst_rect->left, dst_rect->top, dst_rect->right - dst_rect->left,
+    blit_ret = BitBlt(render_target->hdc, dst_rect->left, dst_rect->top, dst_rect->right - dst_rect->left,
             dst_rect->bottom - dst_rect->top, src_hdc, 0, 0, SRCCOPY);
+    if (diag)
+        WARN("OFFICE_D2D_DC_PRESENT target %p hwnd %p src %p rect %s blit %d error %lu.\n",
+                render_target->hdc, WindowFromDC(render_target->hdc), src_hdc,
+                wine_dbgstr_rect(dst_rect), blit_ret, GetLastError());
 
     SetRectEmpty(&empty_rect);
     IDXGISurface1_ReleaseDC(render_target->dxgi_surface, &empty_rect);
@@ -727,6 +733,9 @@ static HRESULT STDMETHODCALLTYPE d2d_dc_render_target_BindDC(ID2D1DCRenderTarget
     HRESULT hr;
 
     TRACE("iface %p, hdc %p, rect %s.\n", iface, hdc, wine_dbgstr_rect(rect));
+    if (GetEnvironmentVariableW(L"WINE_D2D_DC_DIAG", NULL, 0))
+        WARN("OFFICE_D2D_DC_BIND iface %p hdc %p hwnd %p rect %s.\n",
+                iface, hdc, WindowFromDC(hdc), wine_dbgstr_rect(rect));
 
     obj_type = GetObjectType(hdc);
     if (obj_type != OBJ_DC && obj_type != OBJ_ENHMETADC && obj_type != OBJ_MEMDC)

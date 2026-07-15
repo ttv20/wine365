@@ -31,12 +31,76 @@
 
 #include "dxgi1_6.h"
 #include "d3d11_4.h"
+#include "ddk/d3dkmthk.h"
 #ifdef D3D11_INIT_GUID
 #include "initguid.h"
 #endif
 #include "wine/wined3d.h"
 #include "wine/winedxgi.h"
 #include "wine/rbtree.h"
+
+#define D3D11_SHARED_TEXTURE_METADATA_VERSION 1
+#define D3D11_SHARED_TEXTURE_PAYLOAD_VERSION 1
+#define D3D11_SHARED_TEXTURE_NAME_LENGTH 64
+
+struct d3d11_shared_texture_metadata
+{
+    UINT size;
+    UINT version;
+    UINT width;
+    UINT height;
+    UINT mip_levels;
+    UINT array_size;
+    UINT format;
+    UINT sample_count;
+    UINT sample_quality;
+    UINT usage;
+    UINT bind_flags;
+    UINT cpu_access_flags;
+    UINT misc_flags;
+    UINT adapter_luid_low;
+    INT adapter_luid_high;
+    UINT keyed_mutex_global;
+    UINT payload_offset;
+    UINT payload_row_pitch;
+    UINT payload_size;
+    WCHAR payload_name[D3D11_SHARED_TEXTURE_NAME_LENGTH];
+};
+
+struct d3d11_shared_texture_payload
+{
+    UINT size;
+    UINT version;
+    UINT metadata_size;
+    UINT payload_offset;
+    UINT payload_row_pitch;
+    UINT payload_size;
+    UINT width;
+    UINT height;
+    UINT format;
+    UINT reserved;
+    UINT64 generation;
+};
+
+C_ASSERT(sizeof(struct d3d11_shared_texture_metadata) == 204);
+C_ASSERT(sizeof(struct d3d11_shared_texture_payload) == 48);
+
+struct d3d11_shared_texture
+{
+    BOOL owner;
+    LONG acquired;
+    DWORD acquiring_thread;
+    D3DKMT_HANDLE resource;
+    D3DKMT_HANDLE allocation;
+    D3DKMT_HANDLE global_resource;
+    D3DKMT_HANDLE keyed_mutex;
+    D3DKMT_HANDLE global_keyed_mutex;
+    HANDLE mapping;
+    void *view;
+    SIZE_T mapping_size;
+    ID3D11Texture2D *staging_texture;
+    UINT64 generation;
+};
 
 struct d3d_device;
 
@@ -137,11 +201,14 @@ struct d3d_texture2d
 {
     ID3D11Texture2D ID3D11Texture2D_iface;
     ID3D10Texture2D ID3D10Texture2D_iface;
+    IWineDXGIResourceSharing IWineDXGIResourceSharing_iface;
+    IDXGIKeyedMutex IDXGIKeyedMutex_iface;
     LONG refcount;
 
     IUnknown *dxgi_resource;
     struct wined3d_texture *wined3d_texture;
     struct wined3d_swapchain *swapchain;
+    struct d3d11_shared_texture *shared;
     D3D11_TEXTURE2D_DESC desc;
     ID3D11Device5 *device;
 };
@@ -154,6 +221,8 @@ static inline struct d3d_texture2d *impl_from_ID3D11Texture2D(ID3D11Texture2D *i
 HRESULT d3d_texture2d_create(struct d3d_device *device, const D3D11_TEXTURE2D_DESC *desc,
         struct wined3d_texture *wined3d_texture,
         const D3D11_SUBRESOURCE_DATA *data, struct d3d_texture2d **out);
+HRESULT d3d_texture2d_attach_shared(struct d3d_texture2d *texture,
+        struct d3d11_shared_texture *shared);
 struct d3d_texture2d *unsafe_impl_from_ID3D11Texture2D(ID3D11Texture2D *iface);
 struct d3d_texture2d *unsafe_impl_from_ID3D10Texture2D(ID3D10Texture2D *iface);
 
@@ -584,6 +653,10 @@ struct d3d_device
 
     struct wined3d_device_parent device_parent;
     struct wined3d_device *wined3d_device;
+
+    LUID adapter_luid;
+    D3DKMT_HANDLE kmt_adapter;
+    D3DKMT_HANDLE kmt_device;
 
     struct wine_rb_tree blend_states;
     struct wine_rb_tree depthstencil_states;

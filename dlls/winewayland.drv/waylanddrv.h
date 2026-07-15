@@ -324,6 +324,8 @@ void wayland_output_use_xdg_extension(struct wayland_output *output);
 struct wayland_surface *wayland_surface_create(HWND hwnd);
 void wayland_surface_destroy(struct wayland_surface *surface);
 void wayland_surface_make_toplevel(struct wayland_surface *surface);
+void wayland_surface_set_toplevel_parent(struct wayland_surface *surface,
+                                         struct wayland_surface *parent);
 void wayland_surface_make_subsurface(struct wayland_surface *surface,
                                      struct wayland_surface *parent);
 void wayland_surface_clear_role(struct wayland_surface *surface);
@@ -337,7 +339,10 @@ RECT map_rect_to_surface(struct wayland_surface *surface, RECT rect);
 POINT map_point_to_surface(struct wayland_surface *surface, POINT point);
 RECT map_rect_from_surface(struct wayland_surface *surface, RECT rect);
 POINT map_point_from_surface(struct wayland_surface *surface, POINT point);
-void wayland_client_surface_attach(struct wayland_client_surface *client, HWND toplevel);
+void wayland_client_surface_attach(struct wayland_client_surface *client, HWND toplevel,
+                                   const RECT *client_rect);
+void wayland_client_surface_get_rect(struct wayland_client_surface *client, HWND toplevel,
+                                     RECT *client_rect);
 void wayland_surface_ensure_contents(struct wayland_surface *surface);
 void wayland_surface_set_title(struct wayland_surface *surface, LPCWSTR title);
 void wayland_surface_assign_icon(struct wayland_surface *surface);
@@ -382,11 +387,15 @@ struct wayland_win_data
     BOOL resizeable;
     BOOL managed;
     BOOL layered_attribs_set;
+    BOOL defer_cursor_clip;
 };
 
 struct wayland_win_data *wayland_win_data_get(HWND hwnd);
 struct wayland_win_data *wayland_win_data_get_nolock(HWND hwnd);
 void wayland_win_data_release(struct wayland_win_data *data);
+void wayland_win_data_restack_clients_below(HWND toplevel, struct wl_surface *reference);
+void wayland_win_data_restack_client_below_popups(HWND toplevel,
+                                                  struct wayland_client_surface *client);
 
 struct wayland_client_surface *get_client_surface(HWND hwnd);
 void set_client_surface(HWND hwnd, struct wayland_client_surface *client);

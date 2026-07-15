@@ -169,6 +169,7 @@ static INT mru = -1;
 #define INIT_CACHE_SIZE 10
 
 static void *xrender_handle;
+static BOOL xrender_available;
 
 #define MAKE_FUNCPTR(f) static typeof(f) * p##f;
 MAKE_FUNCPTR(XRenderAddGlyphs)
@@ -376,6 +377,7 @@ const struct gdi_dc_funcs *X11DRV_XRender_Init(void)
         glyphsetCache[i].count = -1;
     }
     glyphsetCache[i-1].next = -1;
+    xrender_available = TRUE;
 
     return &xrender_funcs;
 }
@@ -446,6 +448,8 @@ static enum wxr_format get_xrender_format_from_bitmapinfo( const BITMAPINFO *inf
     return WXR_INVALID_FORMAT;
 }
 
+static Picture get_no_alpha_mask(void);
+
 /* Set the x/y scaling and x/y offsets in the transformation matrix of the source picture */
 static void set_xrender_transformation(Picture src_pict, double xscale, double yscale, int xoffset, int yoffset)
 {
@@ -457,6 +461,53 @@ static void set_xrender_transformation(Picture src_pict, double xscale, double y
     }};
 
     pXRenderSetPictureTransform(gdi_display, src_pict, &xform);
+#endif
+}
+
+BOOL X11DRV_XRender_Composite( Drawable src, const XVisualInfo *src_visual,
+                               Drawable dst, const XVisualInfo *dst_visual, HRGN clip,
+                               int src_width, int src_height,
+                               int dst_x, int dst_y, int dst_width, int dst_height )
+{
+#ifdef HAVE_XRENDERSETPICTURETRANSFORM
+    XRenderPictureAttributes pa = {.subwindow_mode = IncludeInferiors};
+    XRenderPictFormat *src_format, *dst_format;
+    Picture src_pict, dst_pict, mask_pict = 0;
+    RGNDATA *clip_data = NULL;
+
+    if (!xrender_available) return FALSE;
+    if (!pXRenderSetPictureTransform || !src_width || !src_height || !dst_width || !dst_height)
+        return FALSE;
+    if (!(src_format = pXRenderFindVisualFormat( gdi_display, src_visual->visual )) ||
+        !(dst_format = pXRenderFindVisualFormat( gdi_display, dst_visual->visual )))
+        return FALSE;
+
+    if (clip && !(clip_data = X11DRV_GetRegionData( clip, 0 ))) return FALSE;
+    src_pict = pXRenderCreatePicture( gdi_display, src, src_format, CPSubwindowMode, &pa );
+    dst_pict = pXRenderCreatePicture( gdi_display, dst, dst_format, CPSubwindowMode, &pa );
+    if (!src_pict || !dst_pict)
+    {
+        if (src_pict) pXRenderFreePicture( gdi_display, src_pict );
+        if (dst_pict) pXRenderFreePicture( gdi_display, dst_pict );
+        free( clip_data );
+        return FALSE;
+    }
+    if (clip_data)
+        pXRenderSetPictureClipRectangles( gdi_display, dst_pict, dst_x, dst_y,
+                                          (XRectangle *)clip_data->Buffer, clip_data->rdh.nCount );
+    if (dst_format->depth == 32 && src_format->depth < 32) mask_pict = get_no_alpha_mask();
+
+    set_xrender_transformation( src_pict, src_width / (double)dst_width,
+                                src_height / (double)dst_height, 0, 0 );
+    pXRenderSetPictureFilter( gdi_display, src_pict, FilterBilinear, 0, 0 );
+    pXRenderComposite( gdi_display, PictOpSrc, src_pict, mask_pict, dst_pict,
+                       0, 0, 0, 0, dst_x, dst_y, dst_width, dst_height );
+    pXRenderFreePicture( gdi_display, dst_pict );
+    pXRenderFreePicture( gdi_display, src_pict );
+    free( clip_data );
+    return TRUE;
+#else
+    return FALSE;
 #endif
 }
 
@@ -2262,6 +2313,14 @@ const struct gdi_dc_funcs *X11DRV_XRender_Init(void)
 {
     TRACE("XRender support not compiled in.\n");
     return NULL;
+}
+
+BOOL X11DRV_XRender_Composite( Drawable src, const XVisualInfo *src_visual,
+                               Drawable dst, const XVisualInfo *dst_visual, HRGN clip,
+                               int src_width, int src_height,
+                               int dst_x, int dst_y, int dst_width, int dst_height )
+{
+    return FALSE;
 }
 
 #endif /* SONAME_LIBXRENDER */

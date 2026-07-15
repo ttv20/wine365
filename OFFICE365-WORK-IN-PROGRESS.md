@@ -13,10 +13,20 @@ fatal startup predicates:
 1. Word error 31, caused by failed `CLSID_GlobalOptions` activation.
 2. Office fail-fast `0x01483052`, caused by a missing WinRT activation factory.
 
-The Word process and main top-level window remain alive after the optional sign-in
-dialog is closed.  The UI is **not usable yet**: captures show only white
-rectangular surfaces, not the Word start page.  Excel and PowerPoint have not been
-investigated because Word's rendering path remains unresolved.
+The Word process now reaches a **usable experimental UI**. Wine transports
+Office's three shared D3D11 surfaces correctly, and a minimal NULL-stream SVG
+document/root/child implementation removes the later `0x1e3c3840` fail-fast.
+The blank visible top-level was then localized to Wine's X11 offscreen
+client-surface compositor: Word rendered a genuine 1440×899 start page/editor in
+the redirected GL surface, but the existing GDI path did not expose it in the
+1080×675 host X window. A new XRender scaling/composition path displays it.
+
+In a disposable prefix, sign-in was dismissed, **Blank document** was clicked,
+and the exact text `Wine 365 XRender interaction test` appeared in the document
+with a visible caret and five-word count. SVG attributes and drawing remain
+stubbed, so some icon fidelity may still be incomplete. The XRender change also
+needs broad regression review and an integrated dual-architecture build. Excel
+and PowerPoint have not been investigated.
 
 No Office binary predicate is patched in the successful test.  Earlier binary
 patches were used only in disposable prefixes to prove causality.
@@ -69,25 +79,71 @@ proper implementation should add the interfaces and runtime class metadata to
 `windows.security.enterprisedata.idl`, implement a conventional
 `windows.security.enterprisedata.dll`, and add conformance tests.
 
-## Rendering blocker and DXGI experiment
+## Rendering progress: genuine shared keyed textures
 
-Word currently creates D3D11/DXGI surfaces but paints a white main window.  The
-most useful outstanding observations are:
+Office creates exactly three relevant 1536×1024 BGRA8 textures with
+render-target/shader-resource bindings and
+`D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX` (`MiscFlags == 0x100`). The current dirty
+follow-up replaces the earlier null-handle diagnostic with:
 
-- Word makes roughly 130 calls to `IDXGIResource::GetSharedHandle`.
-- Wine 11.12 and current Proton branches return `E_NOTIMPL` from this method.
-- Native D3D11 tests expect a non-shared resource to return `S_OK` with a null
-  handle.
-- Word uses flip-sequential swap effect `0x3`, which wined3d logs as
-  unimplemented.
-- `Present1` parameters are partly ignored, and `DiscardView1` is a stub.
+- a private DXGI-to-D3D11 sharing bridge;
+- genuine Wine-server-backed KMT resources and keyed mutexes;
+- stable nonzero legacy KMT handles;
+- validated legacy `ID3D11Device::OpenSharedResource` support;
+- fixed-width pointer-free metadata usable by i386 and x86_64;
+- a named shared-memory canonical pixel payload;
+- per-wrapper local textures synchronized by staging readback/upload at keyed
+  ownership transitions.
 
-`dlls/dxgi/resource.c` currently contains a diagnostic experiment that always
-returns `S_OK` and a null handle (with argument validation).  It has built, but was
-not tested before this snapshot was committed.  It is not a complete shared
-resource implementation and is incorrect for genuinely shared resources.  Before
-retaining this behaviour, Wine must inspect or preserve the resource sharing flags
-and return a real shared handle where required.
+Office uses the expected producer/consumer sequence: the owner acquires key 0 and
+releases key 1; the opened consumer acquires key 1 with timeout 0 and releases key
+0. Diagnostic tracing verified all three pixel paths. Payload generations advance,
+producer checksums change as Word draws, consumer upload checksums match each
+published generation, both row pitches are 6144 bytes, and no transfer failure is
+reported.
+
+The experimental SVG implementation advances that sequence as follows:
+
+```text
+CreateSvgDocument(NULL, {850,161}, ...) -> S_OK
+GetRoot(...) -> non-NULL `svg` element
+CreateChild(L"path", ...) -> S_OK (repeated)
+DrawSvgDocument(...) reached
+```
+
+This removes the debugger/fail-fast result, but the SVG objects do not retain the
+requested attributes (`viewBox`, `width`, `height`, `preserveAspectRatio`, `fill`,
+`fill-opacity`, and path `d`) and `DrawSvgDocument` remains a stub. The focused
+`wine365:kmt-svg-child` run therefore kept Word alive without Program Error but
+its visible main HWND remained blank. Direct X capture subsequently proved that
+the redirected 1440×899 GL client surface already contained Word's genuine UI.
+
+The X11 compositor calls `NtGdiStretchBlt()` after each offscreen GL swap. It
+reported success while failing to expose those pixels in the 1080×675 host X
+window. Clipping changes, equal-size copies, direct X copies, named XComposite
+pixmaps, reparenting, and a forced wined3d GDI present did not fix the visible
+result. An `XGetImage`/nearest-neighbor/`XPutImage` diagnostic proved that reading,
+scaling, and writing the source did work once a trailing GDI blit stopped
+overwriting it.
+
+The current X11 follow-up replaces that expensive CPU loop with XRender source
+and destination pictures, a source transform for DPI scaling, bilinear filtering,
+and `PictOpSrc`, retaining the old GDI path as fallback. Verified result:
+
+```text
+wine365:kmt-svg-x11-xrender-final
+  sha256:af792565f932f47b09f031c28c783ade97acb0061140e16231d330aa44d6c38a
+/mnt/backup/wine365-reference/cache/
+  wineprefix-word-test-x11-xrender-final-interact-20260713
+artifacts/research/word-x11-xrender-final-interact-20260713/
+```
+
+The visible sequence contains a readable Word start page, successful Blank
+document creation, a readable editor, and the exact entered text
+`Wine 365 final XRender test` with a caret and five-word count. This does
+not weaken the verified KMT/keyed-mutex semantics. It is still experimental and
+needs X11 regression review, clipping/visual/alpha coverage, and an integrated
+build of both architectures.
 
 ## Other compatibility work in this snapshot
 
@@ -164,13 +220,16 @@ directory.
 
 ## Next work
 
-1. Test the null-shared-handle DXGI image on a fresh disposable prefix and record
-   whether the white surface changes.
-2. Record the queried resources' sharing flags and implement native-compatible
-   conditional `GetSharedHandle` behaviour.
-3. Investigate flip-sequential presentation and the remaining D3D11/DXGI stubs.
-4. Move EnterpriseData into the proper WinRT DLL/IDL architecture and add tests.
-5. Reduce the activation-filter workaround to a tested compatibility rule and
+1. Review and regression-test XRender offscreen composition, including clipping,
+   non-default visuals, alpha formats, and XRender-unavailable fallback.
+2. Build the integrated tree for both i386 and x86_64 and repeat the Word
+   start-page/create/type smoke test in another disposable prefix.
+3. Replace the local SVG ABI with proper declarations and add focused tests for
+   NULL-stream creation, root/child identity, and ownership.
+4. Implement the SVG attribute/path subset observed in Word and real
+   `DrawSvgDocument` behavior needed for complete icon rendering.
+5. Move EnterpriseData into the proper WinRT DLL/IDL architecture and add tests.
+6. Reduce the activation-filter workaround to a tested compatibility rule and
    remove broad diagnostics.
-6. Rebuild and verify that Word can paint, create, and open a document before
-   beginning Excel or PowerPoint work.
+7. Keep Excel and PowerPoint out of scope until the final integrated Word build
+   and regression checks pass.

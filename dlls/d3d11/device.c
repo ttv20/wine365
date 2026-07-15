@@ -4076,6 +4076,12 @@ static HRESULT STDMETHODCALLTYPE d3d11_device_CreateTexture2D(ID3D11Device5 *ifa
     HRESULT hr;
 
     TRACE("iface %p, desc %p, data %p, texture %p.\n", iface, desc, data, texture);
+    if (desc && GetEnvironmentVariableA("WINE_D3D11_TARGET_DIAG", NULL, 0))
+        WARN("OFFICE_D3D11 CreateTexture2D device %p size %ux%u mips %u array %u format %#x "
+                "samples %u/%u usage %#x bind %#x cpu %#x misc %#x.\n", iface,
+                desc->Width, desc->Height, desc->MipLevels, desc->ArraySize, desc->Format,
+                desc->SampleDesc.Count, desc->SampleDesc.Quality, desc->Usage,
+                desc->BindFlags, desc->CPUAccessFlags, desc->MiscFlags);
 
     if (FAILED(hr = d3d_texture2d_create(device, desc, NULL, data, &object)))
         return hr;
@@ -4147,10 +4153,24 @@ static HRESULT STDMETHODCALLTYPE d3d11_device_CreateRenderTargetView(ID3D11Devic
         ID3D11Resource *resource, const D3D11_RENDER_TARGET_VIEW_DESC *desc, ID3D11RenderTargetView **view)
 {
     struct d3d_device *device = impl_from_ID3D11Device5(iface);
+    D3D11_TEXTURE2D_DESC texture_desc = {0};
+    ID3D11Texture2D *texture2d = NULL;
     struct d3d_rendertarget_view *object;
     HRESULT hr;
 
     TRACE("iface %p, resource %p, desc %p, view %p.\n", iface, resource, desc, view);
+
+    if (resource && GetEnvironmentVariableA("WINE_D3D11_TARGET_DIAG", NULL, 0)
+            && SUCCEEDED(ID3D11Resource_QueryInterface(resource, &IID_ID3D11Texture2D, (void **)&texture2d)))
+    {
+        ID3D11Texture2D_GetDesc(texture2d, &texture_desc);
+        WARN("OFFICE_D3D11 CreateRenderTargetView device %p resource %p size %ux%u format %#x "
+                "bind %#x misc %#x view_format %#x dimension %#x.\n", iface, resource,
+                texture_desc.Width, texture_desc.Height, texture_desc.Format,
+                texture_desc.BindFlags, texture_desc.MiscFlags,
+                desc ? desc->Format : 0, desc ? desc->ViewDimension : 0);
+        ID3D11Texture2D_Release(texture2d);
+    }
 
     *view = NULL;
 
@@ -4591,12 +4611,206 @@ static HRESULT STDMETHODCALLTYPE d3d11_device_CreateDeferredContext(ID3D11Device
     return S_OK;
 }
 
+static BOOL d3d11_shared_texture_metadata_valid(struct d3d_device *device,
+        const struct d3d11_shared_texture_metadata *metadata)
+{
+    UINT64 payload_size;
+    D3D11_TEXTURE2D_DESC desc = {0};
+
+    if (metadata->size != sizeof(*metadata)
+            || metadata->version != D3D11_SHARED_TEXTURE_METADATA_VERSION
+            || metadata->adapter_luid_low != device->adapter_luid.LowPart
+            || metadata->adapter_luid_high != device->adapter_luid.HighPart
+            || !metadata->keyed_mutex_global
+            || !metadata->payload_name[0]
+            || metadata->payload_name[D3D11_SHARED_TEXTURE_NAME_LENGTH - 1]
+            || metadata->payload_offset != sizeof(struct d3d11_shared_texture_payload)
+            || metadata->payload_row_pitch != metadata->width * 4)
+        return FALSE;
+
+    payload_size = (UINT64)metadata->payload_row_pitch * metadata->height;
+    if (payload_size != metadata->payload_size || payload_size > UINT_MAX)
+        return FALSE;
+
+    desc.Width = metadata->width;
+    desc.Height = metadata->height;
+    desc.MipLevels = metadata->mip_levels;
+    desc.ArraySize = metadata->array_size;
+    desc.Format = metadata->format;
+    desc.SampleDesc.Count = metadata->sample_count;
+    desc.SampleDesc.Quality = metadata->sample_quality;
+    desc.Usage = metadata->usage;
+    desc.BindFlags = metadata->bind_flags;
+    desc.CPUAccessFlags = metadata->cpu_access_flags;
+    desc.MiscFlags = metadata->misc_flags;
+
+    return desc.Width && desc.Height && desc.MipLevels == 1 && desc.ArraySize == 1
+            && (desc.Format == DXGI_FORMAT_B8G8R8A8_UNORM
+            || desc.Format == DXGI_FORMAT_R8G8B8A8_UNORM)
+            && desc.SampleDesc.Count == 1 && !desc.SampleDesc.Quality
+            && desc.Usage == D3D11_USAGE_DEFAULT && !desc.CPUAccessFlags
+            && desc.MiscFlags == D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX
+            && (desc.BindFlags & (D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE))
+            && !(desc.BindFlags & ~(D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE));
+}
+
+static BOOL d3d11_shared_texture_payload_valid(const struct d3d11_shared_texture_metadata *metadata,
+        const struct d3d11_shared_texture_payload *payload, SIZE_T mapping_size)
+{
+    UINT64 required_size = (UINT64)metadata->payload_offset + metadata->payload_size;
+
+    return mapping_size >= sizeof(*payload) && required_size <= mapping_size
+            && payload->size == sizeof(*payload)
+            && payload->version == D3D11_SHARED_TEXTURE_PAYLOAD_VERSION
+            && payload->metadata_size == sizeof(*metadata)
+            && payload->payload_offset == metadata->payload_offset
+            && payload->payload_row_pitch == metadata->payload_row_pitch
+            && payload->payload_size == metadata->payload_size
+            && payload->width == metadata->width && payload->height == metadata->height
+            && payload->format == metadata->format;
+}
+
+static void d3d11_shared_texture_open_cleanup(struct d3d_device *device,
+        struct d3d11_shared_texture *shared)
+{
+    if (shared->resource)
+    {
+        D3DKMT_DESTROYALLOCATION destroy = {0};
+        destroy.hDevice = device->kmt_device;
+        destroy.hResource = shared->resource;
+        D3DKMTDestroyAllocation(&destroy);
+    }
+    if (shared->keyed_mutex)
+    {
+        D3DKMT_DESTROYKEYEDMUTEX destroy = {shared->keyed_mutex};
+        D3DKMTDestroyKeyedMutex(&destroy);
+    }
+    if (shared->view)
+        UnmapViewOfFile(shared->view);
+    if (shared->mapping)
+        CloseHandle(shared->mapping);
+    free(shared);
+}
+
 static HRESULT STDMETHODCALLTYPE d3d11_device_OpenSharedResource(ID3D11Device5 *iface, HANDLE resource, REFIID iid,
         void **out)
 {
-    FIXME("iface %p, resource %p, iid %s, out %p stub!\n", iface, resource, debugstr_guid(iid), out);
+    struct d3d11_shared_texture_metadata metadata = {0};
+    D3D11_TEXTURE2D_DESC desc = {0};
+    D3DDDI_OPENALLOCATIONINFO allocation = {0};
+    D3DKMT_QUERYRESOURCEINFO query = {0};
+    D3DKMT_OPENKEYEDMUTEX open_mutex = {0};
+    D3DKMT_OPENRESOURCE open = {0};
+    struct d3d11_shared_texture *shared;
+    struct d3d_texture2d *texture;
+    struct d3d_device *device = impl_from_ID3D11Device5(iface);
+    MEMORY_BASIC_INFORMATION memory_info;
+    NTSTATUS status;
+    HRESULT hr;
 
-    return E_NOTIMPL;
+    TRACE("iface %p, resource %p, iid %s, out %p.\n", iface, resource, debugstr_guid(iid), out);
+
+    if (!out)
+        return E_INVALIDARG;
+    *out = NULL;
+    if (!resource || !device->kmt_device || (ULONG_PTR)resource > UINT_MAX)
+        return E_INVALIDARG;
+
+    query.hDevice = device->kmt_device;
+    query.hGlobalShare = HandleToULong(resource);
+    if ((status = D3DKMTQueryResourceInfo(&query)))
+        return E_INVALIDARG;
+    if (query.NumAllocations != 1 || query.PrivateRuntimeDataSize != sizeof(metadata)
+            || query.ResourcePrivateDriverDataSize || query.TotalPrivateDriverDataSize)
+        return E_INVALIDARG;
+
+    open.hDevice = device->kmt_device;
+    open.hGlobalShare = query.hGlobalShare;
+    open.NumAllocations = 1;
+    open.pOpenAllocationInfo = &allocation;
+    open.pPrivateRuntimeData = &metadata;
+    open.PrivateRuntimeDataSize = sizeof(metadata);
+    if ((status = D3DKMTOpenResource(&open)))
+    {
+        WARN("Failed to open KMT resource, status %#lx.\n", status);
+        return E_INVALIDARG;
+    }
+
+    if (!(shared = calloc(1, sizeof(*shared))))
+    {
+        D3DKMT_DESTROYALLOCATION destroy = {device->kmt_device, open.hResource};
+        D3DKMTDestroyAllocation(&destroy);
+        return E_OUTOFMEMORY;
+    }
+    shared->resource = open.hResource;
+    shared->allocation = allocation.hAllocation;
+    shared->global_resource = query.hGlobalShare;
+
+    if (!d3d11_shared_texture_metadata_valid(device, &metadata))
+    {
+        hr = E_INVALIDARG;
+        goto failed;
+    }
+    if (!(shared->mapping = OpenFileMappingW(FILE_MAP_ALL_ACCESS, FALSE, metadata.payload_name)))
+    {
+        hr = HRESULT_FROM_WIN32(GetLastError());
+        goto failed;
+    }
+    if (!(shared->view = MapViewOfFile(shared->mapping, FILE_MAP_ALL_ACCESS, 0, 0, 0)))
+    {
+        hr = HRESULT_FROM_WIN32(GetLastError());
+        goto failed;
+    }
+    if (!VirtualQuery(shared->view, &memory_info, sizeof(memory_info)))
+    {
+        hr = HRESULT_FROM_WIN32(GetLastError());
+        goto failed;
+    }
+    shared->mapping_size = memory_info.RegionSize;
+    if (!d3d11_shared_texture_payload_valid(&metadata, shared->view, shared->mapping_size))
+    {
+        hr = E_INVALIDARG;
+        goto failed;
+    }
+
+    open_mutex.hSharedHandle = metadata.keyed_mutex_global;
+    if ((status = D3DKMTOpenKeyedMutex(&open_mutex)))
+    {
+        WARN("Failed to open KMT keyed mutex, status %#lx.\n", status);
+        hr = E_INVALIDARG;
+        goto failed;
+    }
+    shared->keyed_mutex = open_mutex.hKeyedMutex;
+    shared->global_keyed_mutex = metadata.keyed_mutex_global;
+
+    desc.Width = metadata.width;
+    desc.Height = metadata.height;
+    desc.MipLevels = metadata.mip_levels;
+    desc.ArraySize = metadata.array_size;
+    desc.Format = metadata.format;
+    desc.SampleDesc.Count = metadata.sample_count;
+    desc.SampleDesc.Quality = metadata.sample_quality;
+    desc.Usage = metadata.usage;
+    desc.BindFlags = metadata.bind_flags;
+    desc.CPUAccessFlags = metadata.cpu_access_flags;
+    desc.MiscFlags = 0;
+    if (FAILED(hr = d3d_texture2d_create(device, &desc, NULL, NULL, &texture)))
+        goto failed;
+    texture->desc.MiscFlags = metadata.misc_flags;
+    d3d_texture2d_attach_shared(texture, shared);
+
+    hr = ID3D11Texture2D_QueryInterface(&texture->ID3D11Texture2D_iface, iid, out);
+    ID3D11Texture2D_Release(&texture->ID3D11Texture2D_iface);
+    if (FAILED(hr))
+        return hr;
+
+    WARN("Opened shared Texture2D KMT resource %#x, keyed mutex %#x.\n",
+            shared->global_resource, shared->global_keyed_mutex);
+    return S_OK;
+
+failed:
+    d3d11_shared_texture_open_cleanup(device, shared);
+    return hr;
 }
 
 static HRESULT STDMETHODCALLTYPE d3d11_device_CheckFormatSupport(ID3D11Device5 *iface, DXGI_FORMAT format,
@@ -5292,6 +5506,9 @@ static HRESULT STDMETHODCALLTYPE d3d11_device_CreateTexture2D1(ID3D11Device5 *if
         ID3D11Texture2D1 **texture)
 {
     FIXME("iface %p, desc %p, initial_data %p, texture %p stub!\n", iface, desc, initial_data, texture);
+    if (desc && GetEnvironmentVariableA("WINE_D3D11_TARGET_DIAG", NULL, 0))
+        WARN("OFFICE_D3D11 CreateTexture2D1 size %ux%u format %#x bind %#x misc %#x layout %#x STUB.\n",
+                desc->Width, desc->Height, desc->Format, desc->BindFlags, desc->MiscFlags, desc->TextureLayout);
 
     return E_NOTIMPL;
 }
@@ -5584,6 +5801,18 @@ static ULONG STDMETHODCALLTYPE d3d_device_inner_Release(IUnknown *iface)
         }
         free(device->context_states);
         d3d11_device_context_cleanup(&device->immediate_context);
+        if (device->kmt_device)
+        {
+            D3DKMT_DESTROYDEVICE destroy = {device->kmt_device};
+            D3DKMTDestroyDevice(&destroy);
+            device->kmt_device = 0;
+        }
+        if (device->kmt_adapter)
+        {
+            D3DKMT_CLOSEADAPTER close = {device->kmt_adapter};
+            D3DKMTCloseAdapter(&close);
+            device->kmt_adapter = 0;
+        }
         if (device->wined3d_device)
         {
             wined3d_device_decref(device->wined3d_device);
@@ -8061,14 +8290,53 @@ static void CDECL device_parent_wined3d_device_created(struct wined3d_device_par
 {
     struct d3d_device *device = device_from_wined3d_device_parent(device_parent);
     struct d3d_device_context_state *state;
+    struct wined3d_device_creation_parameters params;
+    struct wined3d_adapter_identifier identifier = {0};
+    struct wined3d_adapter *adapter;
     struct wined3d_state *wined3d_state;
+    struct wined3d *wined3d;
+    D3DKMT_OPENADAPTERFROMLUID open_adapter = {0};
+    D3DKMT_CREATEDEVICE create_device = {0};
     D3D_FEATURE_LEVEL feature_level;
+    NTSTATUS status;
 
     TRACE("device_parent %p, wined3d_device %p.\n", device_parent, wined3d_device);
 
     wined3d_device_incref(wined3d_device);
     device->wined3d_device = wined3d_device;
     device->immediate_context.wined3d_context = wined3d_device_get_immediate_context(wined3d_device);
+
+    wined3d = wined3d_device_get_wined3d(wined3d_device);
+    wined3d_device_get_creation_parameters(wined3d_device, &params);
+    adapter = wined3d_get_adapter(wined3d, params.adapter_idx);
+    if (adapter && SUCCEEDED(wined3d_adapter_get_identifier(adapter, 0, &identifier)))
+    {
+        device->adapter_luid = identifier.adapter_luid;
+        open_adapter.AdapterLuid = device->adapter_luid;
+        if (!(status = D3DKMTOpenAdapterFromLuid(&open_adapter)))
+        {
+            create_device.hAdapter = open_adapter.hAdapter;
+            if (!(status = D3DKMTCreateDevice(&create_device)))
+            {
+                device->kmt_adapter = open_adapter.hAdapter;
+                device->kmt_device = create_device.hDevice;
+            }
+            else
+            {
+                D3DKMT_CLOSEADAPTER close = {open_adapter.hAdapter};
+                WARN("Failed to create KMT device, status %#lx.\n", status);
+                D3DKMTCloseAdapter(&close);
+            }
+        }
+        else
+        {
+            WARN("Failed to open KMT adapter, status %#lx.\n", status);
+        }
+    }
+    else
+    {
+        WARN("Failed to get the wined3d adapter identifier.\n");
+    }
 
     wined3d_state = wined3d_device_get_state(device->wined3d_device);
     feature_level = d3d_feature_level_from_wined3d(wined3d_state_get_feature_level(wined3d_state));

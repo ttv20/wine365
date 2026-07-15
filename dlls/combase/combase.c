@@ -1767,7 +1767,15 @@ static HRESULT com_get_class_object(const CLSID *rclsid, DWORD clscontext,
         }
         if (FAILED(hr))
             return hr;
-        if (hr == S_OK && !(IsEqualCLSID(rclsid, &CLSID_GlobalOptions) && IsEqualCLSID(&filtered_clsid, &CLSID_NULL)))
+        /* App-V's activation filter often returns S_OK with CLSID_NULL for system
+         * classes it does not virtualize (GlobalOptions, CMultiLanguage, ...).
+         * CLSID_NULL can never activate; treating it as a successful replacement
+         * yields REGDB_E_CLASSNOTREG / GUID_NULL CoCreate noise and Office
+         * fail-fasts (e.g. open-path 0x003d430a after MultiLanguage CoCreate).
+         * Preserve the original CLSID whenever the filter "replaces" with NULL.
+         * Non-NULL replacements remain honored for all classes.
+         */
+        if (hr == S_OK && !IsEqualCLSID(&filtered_clsid, &CLSID_NULL))
             rclsid = &filtered_clsid;
     }
 

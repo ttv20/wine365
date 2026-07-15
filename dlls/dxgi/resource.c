@@ -385,10 +385,22 @@ static HRESULT STDMETHODCALLTYPE dxgi_resource_GetDevice(IDXGIResource1 *iface, 
 /* IDXGIResource methods */
 static HRESULT STDMETHODCALLTYPE dxgi_resource_GetSharedHandle(IDXGIResource1 *iface, HANDLE *shared_handle)
 {
-    FIXME("iface %p, shared_handle %p returning a null handle.\n", iface, shared_handle);
+    struct dxgi_resource *resource = impl_from_IDXGIResource1(iface);
+    IWineDXGIResourceSharing *sharing;
+    HRESULT hr;
+
+    TRACE("iface %p, shared_handle %p.\n", iface, shared_handle);
 
     if (!shared_handle)
         return DXGI_ERROR_INVALID_CALL;
+
+    if (SUCCEEDED(hr = IUnknown_QueryInterface(resource->outer_unknown,
+            &IID_IWineDXGIResourceSharing, (void **)&sharing)))
+    {
+        hr = IWineDXGIResourceSharing_get_shared_handle(sharing, shared_handle);
+        IWineDXGIResourceSharing_Release(sharing);
+        return hr;
+    }
 
     *shared_handle = NULL;
     return S_OK;

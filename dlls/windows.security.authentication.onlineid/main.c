@@ -32,6 +32,10 @@ HRESULT WINAPI DllGetClassObject( REFCLSID clsid, REFIID riid, void **out )
 
 HRESULT WINAPI DllGetActivationFactory( HSTRING classid, IActivationFactory **factory )
 {
+    static const WCHAR web_authentication_core_manager[] =
+        L"Windows.Security.Authentication.Web.Core.WebAuthenticationCoreManager";
+    static const WCHAR web_token_request[] =
+        L"Windows.Security.Authentication.Web.Core.WebTokenRequest";
     const WCHAR *buffer = WindowsGetStringRawBuffer( classid, NULL );
 
     TRACE( "class %s, factory %p.\n", debugstr_hstring( classid ), factory );
@@ -42,6 +46,10 @@ HRESULT WINAPI DllGetActivationFactory( HSTRING classid, IActivationFactory **fa
         IActivationFactory_QueryInterface( authenticator_factory, &IID_IActivationFactory, (void **)factory );
     if (!wcscmp( buffer, RuntimeClass_Windows_Security_Authentication_OnlineId_OnlineIdServiceTicketRequest ))
         IActivationFactory_QueryInterface( ticket_factory, &IID_IActivationFactory, (void **)factory );
+    if (!wcscmp( buffer, web_authentication_core_manager ))
+        IActivationFactory_QueryInterface( authenticator_factory, &IID_IActivationFactory, (void **)factory );
+    if (!wcscmp( buffer, web_token_request ))
+        IActivationFactory_QueryInterface( authenticator_factory, &IID_IActivationFactory, (void **)factory );
 
     if (*factory) return S_OK;
     return CLASS_E_CLASSNOTAVAILABLE;

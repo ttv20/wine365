@@ -34,10 +34,12 @@ namespace Windows.System.Profile {
     interface IAnalyticsInfoStatics2;
     interface IAnalyticsVersionInfo;
     interface IAnalyticsVersionInfo2;
+    interface IRetailInfoStatics;
     interface ISystemIdentificationInfo;
     interface ISystemIdentificationStatics;
     runtimeclass AnalyticsVersionInfo;
     runtimeclass AnalyticsInfo;
+    runtimeclass RetailInfo;
     runtimeclass SystemIdentification;
     runtimeclass SystemIdentificationInfo;
 
@@ -71,6 +73,17 @@ namespace Windows.System.Profile {
     {
         [propget] HRESULT DeviceFamily([out, retval] HSTRING *value);
         [propget] HRESULT DeviceFamilyVersion([out, retval] HSTRING *value);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        exclusiveto(Windows.System.Profile.RetailInfo),
+        uuid(0712c6b8-8b92-4f2a-8499-031f1798d6ef)
+    ]
+    interface IRetailInfoStatics : IInspectable
+    {
+        [propget] HRESULT IsDemoModeEnabled([out, retval] boolean *value);
+        [propget] HRESULT Properties([out, retval] Windows.Foundation.Collections.IMapView<HSTRING, IInspectable *> **value);
     }
 
     [
@@ -114,6 +127,16 @@ namespace Windows.System.Profile {
         threading(both)
     ]
     runtimeclass AnalyticsInfo
+    {
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        marshaling_behavior(agile),
+        static(Windows.System.Profile.IRetailInfoStatics, Windows.Foundation.UniversalApiContract, 1.0),
+        threading(both)
+    ]
+    runtimeclass RetailInfo
     {
     }
 

@@ -22,8 +22,14 @@
 #pragma winrt ns_prefix
 
 import "windows.security.authentication.onlineid.idl";
+import "windows.security.authentication.web.core.idl";
 
 namespace Windows.Security.Authentication.OnlineId {
     runtimeclass OnlineIdSystemAuthenticator;
     runtimeclass OnlineIdServiceTicketRequest;
+}
+
+namespace Windows.Security.Authentication.Web.Core {
+    runtimeclass WebAuthenticationCoreManager;
+    runtimeclass WebTokenRequest;
 }

@@ -274,10 +274,25 @@ static HRESULT STDMETHODCALLTYPE dxgi_factory_CreateSwapChainForHwnd(IWineDXGIFa
 {
     IWineDXGISwapChainFactory *swapchain_factory;
     ID3D12CommandQueue *command_queue;
+    WCHAR class_name[64] = {0};
+    RECT window_rect = {0};
     HRESULT hr;
 
     TRACE("iface %p, device %p, window %p, desc %p, fullscreen_desc %p, output %p, swapchain %p.\n",
             iface, device, window, desc, fullscreen_desc, output, swapchain);
+
+    if (desc && GetEnvironmentVariableA("WINE_DXGI_PRESENT_DIAG", NULL, 0))
+    {
+        GetClassNameW(window, class_name, ARRAY_SIZE(class_name));
+        GetWindowRect(window, &window_rect);
+        WARN("OFFICE_SWAPCHAIN_CREATE hwnd %p class %s rect %s size %ux%u format %#x "
+                "stereo %u samples %u/%u usage %#x buffers %u scaling %#x effect %#x "
+                "alpha %#x flags %#x.\n", window, debugstr_w(class_name),
+                wine_dbgstr_rect(&window_rect), desc->Width, desc->Height, desc->Format,
+                desc->Stereo, desc->SampleDesc.Count, desc->SampleDesc.Quality,
+                desc->BufferUsage, desc->BufferCount, desc->Scaling, desc->SwapEffect,
+                desc->AlphaMode, desc->Flags);
+    }
 
     if (!device || !window || !desc || !swapchain)
     {

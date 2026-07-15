@@ -22,9 +22,14 @@
 #pragma winrt ns_prefix
 
 import "windows.data.json.idl";
+import "windows.security.authorization.appcapabilityaccess.idl";
 
 namespace Windows.Data.Json {
     runtimeclass JsonArray;
     runtimeclass JsonObject;
     runtimeclass JsonValue;
+}
+
+namespace Windows.Security.Authorization.AppCapabilityAccess {
+    runtimeclass AppCapability;
 }

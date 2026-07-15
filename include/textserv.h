@@ -30,6 +30,7 @@ extern "C" {
 #endif
 
 EXTERN_C const IID IID_ITextServices;
+EXTERN_C const IID IID_ITextServices2;
 EXTERN_C const IID IID_ITextHost;
 EXTERN_C const IID IID_ITextHost2;
 

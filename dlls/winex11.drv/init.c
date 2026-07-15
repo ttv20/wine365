@@ -297,7 +297,7 @@ static void x11drv_client_surface_detach( struct client_surface *client )
 static void client_surface_update_geometry( HWND hwnd, struct x11drv_client_surface *surface )
 {
     UINT dpi = NtUserGetDpiForWindow( hwnd ); /* use window DPI here, DPI scaling is handled through offscreen presentation */
-    HWND origin = hwnd, toplevel = NtUserGetAncestor( hwnd, GA_ROOT );
+    HWND origin = hwnd, toplevel = surface->client.toplevel;
     XWindowChanges changes = surface->changes;
     struct x11drv_win_data *data;
     int mask = 0;
@@ -400,8 +400,10 @@ static void x11drv_client_surface_update( struct client_surface *client )
 static void X11DRV_client_surface_present( struct client_surface *client, HDC hdc )
 {
     struct x11drv_client_surface *surface = impl_from_client_surface( client );
-    HWND hwnd = client->hwnd, toplevel = NtUserGetAncestor( hwnd, GA_ROOT );
+    HWND hwnd = client->hwnd, toplevel = client->toplevel;
     struct x11drv_win_data *data;
+    BOOL have_visual = FALSE;
+    XVisualInfo dst_visual;
     RECT rect_dst, rect;
     Drawable window;
     HRGN region;
@@ -412,8 +414,6 @@ static void X11DRV_client_surface_present( struct client_surface *client, HDC hd
     client_surface_update_offscreen( hwnd, surface );
 
     if (!hdc) return;
-    window = X11DRV_get_whole_window( toplevel );
-
     if (NtUserGetPresentRect( toplevel, &rect_dst, -1 /* raw dpi */ ))
     {
         region = 0; /* window is exclusive fullscreen, ignore everything else */
@@ -427,8 +427,12 @@ static void X11DRV_client_surface_present( struct client_surface *client, HDC hd
         NtUserMapWindowPoints( hwnd, toplevel, (POINT *)&rect_dst, 2, NtUserGetWinMonitorDpi( hwnd, MDT_RAW_DPI ) );
     }
 
+    window = X11DRV_get_whole_window( toplevel );
     if ((data = get_win_data( toplevel )))
     {
+        window = data->whole_window;
+        dst_visual = data->vis;
+        have_visual = TRUE;
         OffsetRect( &rect_dst, data->rects.client.left - data->rects.visible.left,
                     data->rects.client.top - data->rects.visible.top );
         release_win_data( data );
@@ -438,8 +442,13 @@ static void X11DRV_client_surface_present( struct client_surface *client, HDC hd
         set_dc_drawable( surface->hdc_dst, window, &rect_dst, IncludeInferiors );
     if (region) NtGdiExtSelectClipRgn( surface->hdc_dst, region, RGN_COPY );
 
-    NtGdiStretchBlt( surface->hdc_dst, 0, 0, rect_dst.right - rect_dst.left, rect_dst.bottom - rect_dst.top,
-                     surface->hdc_src, 0, 0, surface->rect.right, surface->rect.bottom, SRCCOPY, 0 );
+    if (!have_visual || !X11DRV_XRender_Composite( surface->window, &surface->visual, window, &dst_visual, region,
+                                            surface->rect.right, surface->rect.bottom,
+                                            rect_dst.left, rect_dst.top,
+                                            rect_dst.right - rect_dst.left, rect_dst.bottom - rect_dst.top ))
+        NtGdiStretchBlt( surface->hdc_dst, 0, 0, rect_dst.right - rect_dst.left,
+                         rect_dst.bottom - rect_dst.top, surface->hdc_src, 0, 0,
+                         surface->rect.right, surface->rect.bottom, SRCCOPY, 0 );
     XFlush( gdi_display );
 
 done:
@@ -479,6 +488,7 @@ struct client_surface *X11DRV_CreateClientSurface( HWND hwnd, int format )
 
     if (!(surface = client_surface_create( sizeof(*surface), &x11drv_client_surface_funcs, hwnd ))) goto failed;
     surface->colormap = colormap;
+    surface->visual = visual;
 
     if (!get_surface_rect( hwnd, &surface->rect, NtUserGetDpiForWindow( hwnd ) )) goto failed;
     if (!(surface->window = create_client_window( hwnd, surface->rect, &visual, colormap ))) goto failed;

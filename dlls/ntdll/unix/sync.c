@@ -2394,11 +2394,33 @@ NTSTATUS WINAPI NtSignalAndWaitForSingleObject( HANDLE signal, HANDLE wait,
  */
 NTSTATUS WINAPI NtYieldExecution(void)
 {
+    const char *throttle;
+    struct timespec delay;
+    long milliseconds;
 #ifdef HAVE_SCHED_YIELD
 #ifdef RUSAGE_THREAD
     struct rusage u1, u2;
     int ret;
+#endif
+#endif
 
+    if ((throttle = getenv( "WINE_NETUI_INPUT_THROTTLE" )) &&
+        getenv( "WINE_NETUI_YIELD_ACTIVE" ))
+    {
+        milliseconds = strtol( throttle, NULL, 10 );
+        if (milliseconds < 1) milliseconds = 1;
+        if (milliseconds > 20) milliseconds = 20;
+        delay.tv_sec = 0;
+        delay.tv_nsec = milliseconds * 1000000;
+
+        /* Office modal galleries repeatedly yield while no peer is runnable.
+         * Linux sched_yield() then returns immediately and the UI thread spins
+         * at a full core. Keep this process opt-in and cap latency at 20 ms. */
+        nanosleep( &delay, NULL );
+        return STATUS_SUCCESS;
+    }
+#ifdef HAVE_SCHED_YIELD
+#ifdef RUSAGE_THREAD
     ret = getrusage( RUSAGE_THREAD, &u1 );
 #endif
     sched_yield();

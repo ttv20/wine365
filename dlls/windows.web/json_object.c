@@ -240,6 +240,7 @@ static const struct IJsonObjectVtbl json_object_vtbl =
 struct json_object_statics
 {
     IActivationFactory IActivationFactory_iface;
+    IJsonObjectStatics IJsonObjectStatics_iface;
     LONG ref;
 };
 
@@ -260,6 +261,13 @@ static HRESULT WINAPI factory_QueryInterface( IActivationFactory *iface, REFIID 
         IsEqualGUID( iid, &IID_IActivationFactory ))
     {
         *out = &impl->IActivationFactory_iface;
+        IInspectable_AddRef( *out );
+        return S_OK;
+    }
+
+    if (IsEqualGUID( iid, &IID_IJsonObjectStatics ))
+    {
+        *out = &impl->IJsonObjectStatics_iface;
         IInspectable_AddRef( *out );
         return S_OK;
     }
@@ -348,9 +356,65 @@ static const struct IActivationFactoryVtbl factory_vtbl =
     factory_ActivateInstance,
 };
 
+DEFINE_IINSPECTABLE( json_object_statics, IJsonObjectStatics, struct json_object_statics,
+                     IActivationFactory_iface )
+
+static HRESULT WINAPI json_object_statics_Parse( IJsonObjectStatics *iface, HSTRING input,
+                                                  IJsonObject **value )
+{
+    IJsonValue *json_value;
+    HRESULT hr;
+
+    TRACE( "iface %p, input %s, value %p.\n", iface, debugstr_hstring( input ), value );
+
+    if (!value) return E_POINTER;
+    *value = NULL;
+    if (!input) return WEB_E_INVALID_JSON_STRING;
+
+    if (FAILED(hr = json_value_parse( input, &json_value ))) return hr;
+    hr = IJsonValue_GetObject( json_value, value );
+    IJsonValue_Release( json_value );
+    return hr;
+}
+
+static HRESULT WINAPI json_object_statics_TryParse( IJsonObjectStatics *iface, HSTRING input,
+                                                     IJsonObject **result, boolean *succeeded )
+{
+    HRESULT hr;
+
+    TRACE( "iface %p, input %s, result %p, succeeded %p.\n",
+           iface, debugstr_hstring( input ), result, succeeded );
+
+    if (!result || !succeeded) return E_POINTER;
+    *result = NULL;
+    *succeeded = FALSE;
+
+    if (SUCCEEDED(hr = json_object_statics_Parse( iface, input, result )))
+        *succeeded = TRUE;
+    else if (hr == E_OUTOFMEMORY)
+        return hr;
+
+    return S_OK;
+}
+
+static const struct IJsonObjectStaticsVtbl json_object_statics_vtbl =
+{
+    json_object_statics_QueryInterface,
+    json_object_statics_AddRef,
+    json_object_statics_Release,
+    /* IInspectable methods */
+    json_object_statics_GetIids,
+    json_object_statics_GetRuntimeClassName,
+    json_object_statics_GetTrustLevel,
+    /* IJsonObjectStatics methods */
+    json_object_statics_Parse,
+    json_object_statics_TryParse,
+};
+
 static struct json_object_statics json_object_statics =
 {
     {&factory_vtbl},
+    {&json_object_statics_vtbl},
     1,
 };
 
