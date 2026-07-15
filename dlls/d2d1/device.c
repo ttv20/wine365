@@ -2131,12 +2131,6 @@ static HRESULT STDMETHODCALLTYPE d2d_device_context_EndDraw(ID2D1DeviceContext6 
 
     TRACE("iface %p, tag1 %p, tag2 %p.\n", iface, tag1, tag2);
 
-    if (context->target.type == D2D_TARGET_COMMAND_LIST)
-    {
-        FIXME("Unimplemented for command list target.\n");
-        return E_NOTIMPL;
-    }
-
     if (tag1)
         *tag1 = context->error.tag1;
     if (tag2)

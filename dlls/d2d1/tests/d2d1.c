@@ -10875,6 +10875,9 @@ static void test_command_list(BOOL d3d11)
     ok(target == (ID2D1Image *)command_list, "Unexpected context target.\n");
     ID2D1Image_Release(target);
 
+    hr = ID2D1DeviceContext_EndDraw(device_context, NULL, NULL);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+
     hr = ID2D1CommandList_Close(command_list);
     ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
 
