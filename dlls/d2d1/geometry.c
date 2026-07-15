@@ -2934,8 +2934,12 @@ static BOOL d2d_geometry_outline_add_join(struct d2d_geometry *geometry,
     size_t base_idx;
     float ccw;
 
+    ccw = d2d_point_ccw(&origin, prev, next);
+    if (ccw == 0.0f)
+        return TRUE;
+
     if (!d2d_array_reserve((void **)&geometry->outline.vertices, &geometry->outline.vertices_size,
-            geometry->outline.vertex_count + 4, sizeof(*geometry->outline.vertices)))
+            geometry->outline.vertex_count + 3, sizeof(*geometry->outline.vertices)))
     {
         ERR("Failed to grow outline vertices array.\n");
         return FALSE;
@@ -2944,42 +2948,32 @@ static BOOL d2d_geometry_outline_add_join(struct d2d_geometry *geometry,
     v = &geometry->outline.vertices[base_idx];
 
     if (!d2d_array_reserve((void **)&geometry->outline.faces, &geometry->outline.faces_size,
-            geometry->outline.face_count + 2, sizeof(*geometry->outline.faces)))
+            geometry->outline.face_count + 1, sizeof(*geometry->outline.faces)))
     {
         ERR("Failed to grow outline faces array.\n");
         return FALSE;
     }
     f = &geometry->outline.faces[geometry->outline.face_count];
 
-    ccw = d2d_point_ccw(&origin, prev, next);
-    if (ccw == 0.0f)
+    /* Join the outer edges with a bevel triangle. The segment rectangles
+     * overlap on the inner side, so using one inner endpoint as the third
+     * vertex closes the outer gap without producing an unbounded miter. */
+    if (ccw < 0.0f)
     {
-        d2d_outline_vertex_set(&v[0], p0->x, p0->y, -prev->x, -prev->y, -prev->x, -prev->y);
-        d2d_outline_vertex_set(&v[1], p0->x, p0->y,  prev->x,  prev->y,  prev->x,  prev->y);
-        d2d_outline_vertex_set(&v[2], p0->x + 25.0f * -prev->x, p0->y + 25.0f * -prev->y,
-                 prev->x,  prev->y,  prev->x,  prev->y);
-        d2d_outline_vertex_set(&v[3], p0->x + 25.0f * -prev->x, p0->y + 25.0f * -prev->y,
-                -prev->x, -prev->y, -prev->x, -prev->y);
-    }
-    else if (ccw < 0.0f)
-    {
-        d2d_outline_vertex_set(&v[0], p0->x, p0->y,  next->x,  next->y, -prev->x, -prev->y);
+        d2d_outline_vertex_set(&v[0], p0->x, p0->y,  prev->x,  prev->y,  prev->x,  prev->y);
         d2d_outline_vertex_set(&v[1], p0->x, p0->y, -next->x, -next->y, -next->x, -next->y);
-        d2d_outline_vertex_set(&v[2], p0->x, p0->y, -next->x, -next->y,  prev->x,  prev->y);
-        d2d_outline_vertex_set(&v[3], p0->x, p0->y,  prev->x,  prev->y,  prev->x,  prev->y);
+        d2d_outline_vertex_set(&v[2], p0->x, p0->y, -prev->x, -prev->y, -prev->x, -prev->y);
     }
     else
     {
-        d2d_outline_vertex_set(&v[0], p0->x, p0->y,  prev->x,  prev->y, -next->x, -next->y);
-        d2d_outline_vertex_set(&v[1], p0->x, p0->y, -prev->x, -prev->y, -prev->x, -prev->y);
-        d2d_outline_vertex_set(&v[2], p0->x, p0->y, -prev->x, -prev->y,  next->x,  next->y);
-        d2d_outline_vertex_set(&v[3], p0->x, p0->y,  next->x,  next->y,  next->x,  next->y);
+        d2d_outline_vertex_set(&v[0], p0->x, p0->y, -prev->x, -prev->y, -prev->x, -prev->y);
+        d2d_outline_vertex_set(&v[1], p0->x, p0->y,  next->x,  next->y,  next->x,  next->y);
+        d2d_outline_vertex_set(&v[2], p0->x, p0->y,  prev->x,  prev->y,  prev->x,  prev->y);
     }
-    geometry->outline.vertex_count += 4;
+    geometry->outline.vertex_count += 3;
 
-    d2d_face_set(&f[0], base_idx + 1, base_idx + 0, base_idx + 2);
-    d2d_face_set(&f[1], base_idx + 2, base_idx + 0, base_idx + 3);
-    geometry->outline.face_count += 2;
+    d2d_face_set(&f[0], base_idx + 0, base_idx + 1, base_idx + 2);
+    geometry->outline.face_count += 1;
 
     return TRUE;
 }
