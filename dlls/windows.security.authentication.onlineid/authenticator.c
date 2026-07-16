@@ -30,6 +30,10 @@ static const GUID IID_IWebAuthenticationCoreManagerStatics =
     {0x6aca7c92, 0xa581, 0x4479, {0x9c, 0x10, 0x75, 0x2e, 0xff, 0x44, 0xfd, 0x34}};
 static const GUID IID_IWebAuthenticationCoreManagerStatics4 =
     {0x54e633fe, 0x96e0, 0x41e8, {0x98, 0x32, 0x12, 0x98, 0x89, 0x7c, 0x2a, 0xaf}};
+/* Desktop Office obtains this non-WinRT interop interface from the manager
+ * activation factory when an interactive request needs an owner window. */
+static const GUID IID_IWebAuthenticationCoreManagerInterop =
+    {0xf4b8e804, 0x811e, 0x4436, {0xb6, 0x9c, 0x44, 0xcb, 0x67, 0xb7, 0x20, 0x84}};
 static const GUID IID_IWebAccountProvider =
     {0x29dcc8c3, 0x7ab9, 0x4a7c, {0xa3, 0x36, 0xb9, 0x42, 0xf9, 0xdb, 0xf7, 0xc7}};
 static const GUID IID_IWebAccountProvider2 =
@@ -2017,6 +2021,7 @@ static HRESULT web_token_request_result_create( INT32 status, IInspectable **out
 
 struct web_authentication_core_manager_statics;
 struct web_authentication_core_manager_statics4;
+struct web_authentication_core_manager_interop;
 
 struct web_authentication_core_manager_statics_vtbl
 {
@@ -2050,6 +2055,21 @@ struct web_authentication_core_manager_statics4_vtbl
     HRESULT (WINAPI *FindSystemAccountProviderWithAuthorityForUserAsync)(struct web_authentication_core_manager_statics4 *, HSTRING, HSTRING, IInspectable *, IInspectable **);
 };
 
+struct web_authentication_core_manager_interop_vtbl
+{
+    HRESULT (WINAPI *QueryInterface)(struct web_authentication_core_manager_interop *, REFIID, void **);
+    ULONG (WINAPI *AddRef)(struct web_authentication_core_manager_interop *);
+    ULONG (WINAPI *Release)(struct web_authentication_core_manager_interop *);
+    HRESULT (WINAPI *GetIids)(struct web_authentication_core_manager_interop *, ULONG *, IID **);
+    HRESULT (WINAPI *GetRuntimeClassName)(struct web_authentication_core_manager_interop *, HSTRING *);
+    HRESULT (WINAPI *GetTrustLevel)(struct web_authentication_core_manager_interop *, TrustLevel *);
+    HRESULT (WINAPI *RequestTokenForWindowAsync)(struct web_authentication_core_manager_interop *, HWND,
+                                                 IInspectable *, REFIID, void **);
+    HRESULT (WINAPI *RequestTokenWithWebAccountForWindowAsync)(struct web_authentication_core_manager_interop *,
+                                                               HWND, IInspectable *, IInspectable *, REFIID,
+                                                               void **);
+};
+
 struct web_authentication_core_manager_statics
 {
     const struct web_authentication_core_manager_statics_vtbl *lpVtbl;
@@ -2060,12 +2080,18 @@ struct web_authentication_core_manager_statics4
     const struct web_authentication_core_manager_statics4_vtbl *lpVtbl;
 };
 
+struct web_authentication_core_manager_interop
+{
+    const struct web_authentication_core_manager_interop_vtbl *lpVtbl;
+};
+
 struct authenticator_statics
 {
     IActivationFactory IActivationFactory_iface;
     IOnlineIdSystemAuthenticatorStatics IOnlineIdSystemAuthenticatorStatics_iface;
     struct web_authentication_core_manager_statics IWebAuthenticationCoreManagerStatics_iface;
     struct web_authentication_core_manager_statics4 IWebAuthenticationCoreManagerStatics4_iface;
+    struct web_authentication_core_manager_interop IWebAuthenticationCoreManagerInterop_iface;
     struct web_token_request_factory IWebTokenRequestFactory_iface;
     LONG ref;
 };
@@ -2108,6 +2134,13 @@ static HRESULT WINAPI factory_QueryInterface( IActivationFactory *iface, REFIID 
     if (IsEqualGUID( iid, &IID_IWebAuthenticationCoreManagerStatics4 ))
     {
         *out = &impl->IWebAuthenticationCoreManagerStatics4_iface;
+        IInspectable_AddRef( *out );
+        return S_OK;
+    }
+
+    if (IsEqualGUID( iid, &IID_IWebAuthenticationCoreManagerInterop ))
+    {
+        *out = &impl->IWebAuthenticationCoreManagerInterop_iface;
         IInspectable_AddRef( *out );
         return S_OK;
     }
@@ -2345,13 +2378,36 @@ WEB_MANAGER_ASYNC_STUB( web_manager_GetTokenSilentlyWithWebAccountAsync,
         (struct web_authentication_core_manager_statics *iface, IInspectable *request, IInspectable *account,
          IInspectable **operation),
         ("iface %p, request %p, account %p, operation %p stub!\n", iface, request, account, operation) )
-WEB_MANAGER_ASYNC_STUB( web_manager_RequestTokenAsync,
-        (struct web_authentication_core_manager_statics *iface, IInspectable *request, IInspectable **operation),
-        ("iface %p, request %p, operation %p stub!\n", iface, request, operation) )
-WEB_MANAGER_ASYNC_STUB( web_manager_RequestTokenWithWebAccountAsync,
-        (struct web_authentication_core_manager_statics *iface, IInspectable *request, IInspectable *account,
-         IInspectable **operation),
-        ("iface %p, request %p, account %p, operation %p stub!\n", iface, request, account, operation) )
+static HRESULT create_interactive_token_operation( INT32 status, REFIID iid, void **out )
+{
+    IInspectable *result = NULL, *operation = NULL;
+    HRESULT hr;
+
+    if (!out) return E_POINTER;
+    *out = NULL;
+    if (FAILED(hr = web_token_request_result_create( status, &result ))) return hr;
+    hr = completed_provider_operation_create( result, &operation );
+    IInspectable_Release( result );
+    if (FAILED(hr)) return hr;
+    hr = IInspectable_QueryInterface( operation, iid, out );
+    IInspectable_Release( operation );
+    return hr;
+}
+
+static HRESULT WINAPI web_manager_RequestTokenAsync(
+        struct web_authentication_core_manager_statics *iface, IInspectable *request, IInspectable **operation )
+{
+    TRACE( "iface %p, request %p, operation %p.\n", iface, request, operation );
+    return create_interactive_token_operation( 4, &IID_IInspectable, (void **)operation );
+}
+
+static HRESULT WINAPI web_manager_RequestTokenWithWebAccountAsync(
+        struct web_authentication_core_manager_statics *iface, IInspectable *request, IInspectable *account,
+        IInspectable **operation )
+{
+    TRACE( "iface %p, request %p, account %p, operation %p.\n", iface, request, account, operation );
+    return create_interactive_token_operation( 4, &IID_IInspectable, (void **)operation );
+}
 WEB_MANAGER_ASYNC_STUB( web_manager_FindAccountAsync,
         (struct web_authentication_core_manager_statics *iface, IInspectable *provider, HSTRING id,
          IInspectable **operation),
@@ -2407,6 +2463,91 @@ static const struct web_authentication_core_manager_statics_vtbl web_manager_sta
     web_manager_FindAccountAsync,
     web_manager_FindAccountProviderAsync,
     web_manager_FindAccountProviderWithAuthorityAsync,
+};
+
+static inline struct authenticator_statics *impl_from_web_manager_interop(
+        struct web_authentication_core_manager_interop *iface )
+{
+    return CONTAINING_RECORD( iface, struct authenticator_statics, IWebAuthenticationCoreManagerInterop_iface );
+}
+
+static HRESULT WINAPI web_manager_interop_QueryInterface( struct web_authentication_core_manager_interop *iface,
+                                                           REFIID iid, void **out )
+{
+    struct authenticator_statics *impl = impl_from_web_manager_interop( iface );
+    return IActivationFactory_QueryInterface( &impl->IActivationFactory_iface, iid, out );
+}
+
+static ULONG WINAPI web_manager_interop_AddRef( struct web_authentication_core_manager_interop *iface )
+{
+    struct authenticator_statics *impl = impl_from_web_manager_interop( iface );
+    return IActivationFactory_AddRef( &impl->IActivationFactory_iface );
+}
+
+static ULONG WINAPI web_manager_interop_Release( struct web_authentication_core_manager_interop *iface )
+{
+    struct authenticator_statics *impl = impl_from_web_manager_interop( iface );
+    return IActivationFactory_Release( &impl->IActivationFactory_iface );
+}
+
+static HRESULT WINAPI web_manager_interop_GetIids( struct web_authentication_core_manager_interop *iface,
+                                                    ULONG *count, IID **iids )
+{
+    if (!count || !iids) return E_POINTER;
+    if (!(*iids = CoTaskMemAlloc( sizeof(**iids) ))) return E_OUTOFMEMORY;
+    (*iids)[0] = IID_IWebAuthenticationCoreManagerInterop;
+    *count = 1;
+    return S_OK;
+}
+
+static HRESULT WINAPI web_manager_interop_GetRuntimeClassName(
+        struct web_authentication_core_manager_interop *iface, HSTRING *name )
+{
+    static const WCHAR class_name[] =
+        L"Windows.Security.Authentication.Web.Core.WebAuthenticationCoreManager";
+    if (!name) return E_POINTER;
+    return WindowsCreateString( class_name, ARRAY_SIZE(class_name) - 1, name );
+}
+
+static HRESULT WINAPI web_manager_interop_GetTrustLevel( struct web_authentication_core_manager_interop *iface,
+                                                          TrustLevel *level )
+{
+    if (!level) return E_POINTER;
+    *level = BaseTrust;
+    return S_OK;
+}
+
+static HRESULT WINAPI web_manager_interop_RequestTokenForWindowAsync(
+        struct web_authentication_core_manager_interop *iface, HWND window, IInspectable *request,
+        REFIID iid, void **operation )
+{
+    TRACE( "iface %p, window %p, request %p, iid %s, operation %p.\n", iface, window, request,
+           debugstr_guid( iid ), operation );
+    /* UserInteractionRequired is only valid for the silent API.  Report that
+     * this Wine broker has no interactive account provider and let MSAL choose
+     * its non-WAM browser path. */
+    return create_interactive_token_operation( 4, iid, operation );
+}
+
+static HRESULT WINAPI web_manager_interop_RequestTokenWithWebAccountForWindowAsync(
+        struct web_authentication_core_manager_interop *iface, HWND window, IInspectable *request,
+        IInspectable *account, REFIID iid, void **operation )
+{
+    TRACE( "iface %p, window %p, request %p, account %p, iid %s, operation %p.\n", iface, window,
+           request, account, debugstr_guid( iid ), operation );
+    return create_interactive_token_operation( 4, iid, operation );
+}
+
+static const struct web_authentication_core_manager_interop_vtbl web_manager_interop_vtbl =
+{
+    web_manager_interop_QueryInterface,
+    web_manager_interop_AddRef,
+    web_manager_interop_Release,
+    web_manager_interop_GetIids,
+    web_manager_interop_GetRuntimeClassName,
+    web_manager_interop_GetTrustLevel,
+    web_manager_interop_RequestTokenForWindowAsync,
+    web_manager_interop_RequestTokenWithWebAccountForWindowAsync,
 };
 
 static HRESULT WINAPI web_manager_statics4_QueryInterface( struct web_authentication_core_manager_statics4 *iface,
@@ -2802,6 +2943,7 @@ static struct authenticator_statics authenticator_statics =
     {&authenticator_statics_vtbl},
     {&web_manager_statics_vtbl},
     {&web_manager_statics4_vtbl},
+    {&web_manager_interop_vtbl},
     {&token_request_factory_vtbl},
     1,
 };

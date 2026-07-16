@@ -17,7 +17,7 @@
  */
 
 #include "d2d1_private.h"
-#include <d3dcompiler.h>
+#include "shape_shaders.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(d2d);
 
@@ -29,6 +29,9 @@ static const D2D1_MATRIX_3X2_F identity =
     0.0f, 1.0f,
     0.0f, 0.0f,
 }}};
+
+static HRESULT d2d_device_context_ensure_shape_resources(struct d2d_device_context *render_target,
+        enum d2d_shape_type shape_type);
 
 struct d2d_draw_text_layout_ctx
 {
@@ -169,6 +172,7 @@ static void d2d_device_context_draw(struct d2d_device_context *render_target, en
     D3D11_RECT scissor_rect;
     unsigned int offset;
     D3D11_VIEWPORT vp;
+    HRESULT hr;
 
     vp.TopLeftX = 0;
     vp.TopLeftY = 0;
@@ -179,6 +183,15 @@ static void d2d_device_context_draw(struct d2d_device_context *render_target, en
 
     if (render_target->cs)
         EnterCriticalSection(render_target->cs);
+
+    if (FAILED(hr = d2d_device_context_ensure_shape_resources(render_target, shape_type)))
+    {
+        WARN("Failed to create resources for shape type %#x, hr %#lx.\n", shape_type, hr);
+        render_target->error.code = hr;
+        if (render_target->cs)
+            LeaveCriticalSection(render_target->cs);
+        return;
+    }
 
     ID3D11Device1_GetImmediateContext1(device, &context);
     ID3D11DeviceContext1_SwapDeviceContextState(context, render_target->d3d_state, &prev_state);
@@ -321,12 +334,15 @@ static ULONG STDMETHODCALLTYPE d2d_device_context_inner_Release(IUnknown *iface)
         ID3D11Buffer_Release(context->vb);
         ID3D11Buffer_Release(context->ib);
         ID3D11Buffer_Release(context->ps_cb);
-        ID3D11PixelShader_Release(context->ps);
+        if (context->ps)
+            ID3D11PixelShader_Release(context->ps);
         ID3D11Buffer_Release(context->vs_cb);
         for (i = 0; i < D2D_SHAPE_TYPE_COUNT; ++i)
         {
-            ID3D11VertexShader_Release(context->shape_resources[i].vs);
-            ID3D11InputLayout_Release(context->shape_resources[i].il);
+            if (context->shape_resources[i].vs)
+                ID3D11VertexShader_Release(context->shape_resources[i].vs);
+            if (context->shape_resources[i].il)
+                ID3D11InputLayout_Release(context->shape_resources[i].il);
         }
         for (i = 0; i < D2D_SAMPLER_INTERPOLATION_MODE_COUNT; ++i)
         {
@@ -4762,7 +4778,7 @@ static const char shape_vs_code_curve[] =
     "            * float2(transform_rtx.w, transform_rty.w);\n"
     "    o.position = float4(position + float2(-1.0f, 1.0f), 0.0f, 1.0f);\n"
     "}\n";
-static const char shape_ps_code[] =
+static const char shape_ps_code[] __attribute__((unused)) =
     "#define BRUSH_TYPE_SOLID    0\n"
     "#define BRUSH_TYPE_LINEAR   1\n"
     "#define BRUSH_TYPE_RADIAL   2\n"
@@ -4973,20 +4989,70 @@ static const struct shape_info
     const char *name;
     const char *vs_code;
     size_t vs_code_size;
+    unsigned int resource_id;
 }
 shape_info[] =
 {
     {D2D_SHAPE_TYPE_OUTLINE,        shape_il_desc_outline,        ARRAY_SIZE(shape_il_desc_outline),
-     "outline",                     shape_vs_code_outline,        sizeof(shape_vs_code_outline) - 1},
+     "outline",                     shape_vs_code_outline,        sizeof(shape_vs_code_outline) - 1,
+     IDR_D2D_SHAPE_VS_OUTLINE},
     {D2D_SHAPE_TYPE_BEZIER_OUTLINE, shape_il_desc_curve_outline,  ARRAY_SIZE(shape_il_desc_curve_outline),
-     "bezier_outline",              shape_vs_code_bezier_outline, sizeof(shape_vs_code_bezier_outline) - 1},
+     "bezier_outline",              shape_vs_code_bezier_outline, sizeof(shape_vs_code_bezier_outline) - 1,
+     IDR_D2D_SHAPE_VS_BEZIER_OUTLINE},
     {D2D_SHAPE_TYPE_ARC_OUTLINE,    shape_il_desc_curve_outline,  ARRAY_SIZE(shape_il_desc_curve_outline),
-     "arc_outline",                 shape_vs_code_arc_outline,    sizeof(shape_vs_code_arc_outline) - 1},
+     "arc_outline",                 shape_vs_code_arc_outline,    sizeof(shape_vs_code_arc_outline) - 1,
+     IDR_D2D_SHAPE_VS_ARC_OUTLINE},
     {D2D_SHAPE_TYPE_TRIANGLE,       shape_il_desc_triangle,       ARRAY_SIZE(shape_il_desc_triangle),
-     "triangle",                    shape_vs_code_triangle,       sizeof(shape_vs_code_triangle) - 1},
+     "triangle",                    shape_vs_code_triangle,       sizeof(shape_vs_code_triangle) - 1,
+     IDR_D2D_SHAPE_VS_TRIANGLE},
     {D2D_SHAPE_TYPE_CURVE,          shape_il_desc_curve,          ARRAY_SIZE(shape_il_desc_curve),
-     "curve",                       shape_vs_code_curve,          sizeof(shape_vs_code_curve) - 1},
+     "curve",                       shape_vs_code_curve,          sizeof(shape_vs_code_curve) - 1,
+     IDR_D2D_SHAPE_VS_CURVE},
 };
+
+static HRESULT d2d_device_context_ensure_shape_resources(struct d2d_device_context *render_target,
+        enum d2d_shape_type shape_type)
+{
+    const struct d2d_shader_blob *precompiled;
+    struct d2d_shape_resources *resources;
+    const struct shape_info *si = NULL;
+    unsigned int i;
+    HRESULT hr;
+
+    if (shape_type >= D2D_SHAPE_TYPE_COUNT)
+        return E_INVALIDARG;
+    resources = &render_target->shape_resources[shape_type];
+    if (resources->vs && resources->il && render_target->ps)
+        return S_OK;
+
+    for (i = 0; i < ARRAY_SIZE(shape_info); ++i)
+    {
+        if (shape_info[i].shape_type == shape_type)
+        {
+            si = &shape_info[i];
+            break;
+        }
+    }
+    if (!si)
+        return E_INVALIDARG;
+
+    precompiled = &render_target->device->precompiled_shape_vs[i];
+    assert(precompiled->code);
+    if (!resources->il && FAILED(hr = ID3D11Device1_CreateInputLayout(render_target->d3d_device,
+            si->il_desc, si->il_element_count, precompiled->code, precompiled->size, &resources->il)))
+        return hr;
+    if (!resources->vs && FAILED(hr = ID3D11Device1_CreateVertexShader(render_target->d3d_device,
+            precompiled->code, precompiled->size, NULL, &resources->vs)))
+        return hr;
+
+    precompiled = &render_target->device->precompiled_shape_ps;
+    assert(precompiled->code);
+    if (!render_target->ps && FAILED(hr = ID3D11Device1_CreatePixelShader(render_target->d3d_device,
+            precompiled->code, precompiled->size, NULL, &render_target->ps)))
+        return hr;
+
+    return S_OK;
+}
 
 static HRESULT d2d_device_context_init(struct d2d_device_context *render_target,
         struct d2d_device *device, IUnknown *outer_unknown, const struct d2d_device_context_ops *ops)
@@ -4996,7 +5062,6 @@ static HRESULT d2d_device_context_init(struct d2d_device_context *render_target,
     D3D11_RASTERIZER_DESC rs_desc;
     D3D11_BUFFER_DESC buffer_desc;
     struct d2d_factory *factory;
-    ID3D10Blob *precompiled;
     unsigned int i;
     HRESULT hr;
 
@@ -5045,29 +5110,6 @@ static HRESULT d2d_device_context_init(struct d2d_device_context *render_target,
         goto err;
     }
 
-    for (i = 0; i < ARRAY_SIZE(shape_info); ++i)
-    {
-        const struct shape_info *si = &shape_info[i];
-
-        assert(device->precompiled_shape_vs[i]);
-        precompiled = device->precompiled_shape_vs[i];
-        if (FAILED(hr = ID3D11Device1_CreateInputLayout(render_target->d3d_device, si->il_desc, si->il_element_count,
-                ID3D10Blob_GetBufferPointer(precompiled), ID3D10Blob_GetBufferSize(precompiled),
-                &render_target->shape_resources[si->shape_type].il)))
-        {
-            WARN("Failed to create input layout for shape type %#x, hr %#lx.\n", si->shape_type, hr);
-            goto err;
-        }
-
-        if (FAILED(hr = ID3D11Device1_CreateVertexShader(render_target->d3d_device,
-                ID3D10Blob_GetBufferPointer(precompiled), ID3D10Blob_GetBufferSize(precompiled),
-                NULL, &render_target->shape_resources[si->shape_type].vs)))
-        {
-            WARN("Failed to create vertex shader for shape type %#x, hr %#lx.\n", si->shape_type, hr);
-            goto err;
-        }
-    }
-
     buffer_desc.ByteWidth = sizeof(struct d2d_vs_cb);
     buffer_desc.Usage = D3D11_USAGE_DYNAMIC;
     buffer_desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
@@ -5078,16 +5120,6 @@ static HRESULT d2d_device_context_init(struct d2d_device_context *render_target,
             &render_target->vs_cb)))
     {
         WARN("Failed to create constant buffer, hr %#lx.\n", hr);
-        goto err;
-    }
-
-    assert(device->precompiled_shape_ps);
-    precompiled = device->precompiled_shape_ps;
-    if (FAILED(hr = ID3D11Device1_CreatePixelShader(render_target->d3d_device,
-            ID3D10Blob_GetBufferPointer(precompiled), ID3D10Blob_GetBufferSize(precompiled),
-            NULL, &render_target->ps)))
-    {
-        WARN("Failed to create pixel shader, hr %#lx.\n", hr);
         goto err;
     }
 
@@ -5332,13 +5364,6 @@ static ULONG WINAPI d2d_device_Release(ID2D1Device6 *iface)
         IDXGIDevice_Release(device->dxgi_device);
         ID2D1Factory1_Release(device->factory);
         d2d_device_indexed_objects_clear(&device->shaders);
-        for (unsigned int i = 0; i < D2D_SHAPE_TYPE_COUNT; ++i)
-        {
-            if (device->precompiled_shape_vs[i])
-                ID3D10Blob_Release(device->precompiled_shape_vs[i]);
-        }
-        if (device->precompiled_shape_ps)
-            ID3D10Blob_Release(device->precompiled_shape_ps);
         free(device);
     }
 
@@ -5563,11 +5588,31 @@ struct d2d_device *unsafe_impl_from_ID2D1Device(ID2D1Device1 *iface)
     return CONTAINING_RECORD(iface, struct d2d_device, ID2D1Device6_iface);
 }
 
+static HRESULT d2d_load_precompiled_shape_shader(unsigned int resource_id, struct d2d_shader_blob *shader)
+{
+    HMODULE module;
+    HRSRC resource;
+    HGLOBAL data;
+
+    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+            (const WCHAR *)d2d_load_precompiled_shape_shader, &module))
+        return HRESULT_FROM_WIN32(GetLastError());
+    if (!(resource = FindResourceW(module, MAKEINTRESOURCEW(resource_id), (LPCWSTR)RT_RCDATA)))
+        return HRESULT_FROM_WIN32(GetLastError());
+    if (!(data = LoadResource(module, resource)))
+        return HRESULT_FROM_WIN32(GetLastError());
+    if (!(shader->code = LockResource(data)))
+        return E_FAIL;
+    if (!(shader->size = SizeofResource(module, resource)))
+        return HRESULT_FROM_WIN32(GetLastError());
+
+    return S_OK;
+}
+
 HRESULT d2d_device_init(struct d2d_device *device, ID2D1Factory1 *factory, IDXGIDevice *dxgi_device,
     bool allow_get_dxgi_device)
 {
     HRESULT hr;
-    ID3D10Blob *compiled;
 
     device->ID2D1Device6_iface.lpVtbl = &d2d_device_vtbl;
     device->refcount = 1;
@@ -5579,24 +5624,19 @@ HRESULT d2d_device_init(struct d2d_device *device, ID2D1Factory1 *factory, IDXGI
 
     for (unsigned int i = 0; i < ARRAY_SIZE(shape_info); ++i)
     {
-        const struct shape_info *si = &shape_info[i];
-
-        if (FAILED(hr = D3DCompile(si->vs_code, si->vs_code_size, si->name, NULL, NULL,
-                "main", "vs_4_0", 0, 0, &compiled, NULL)))
+        if (FAILED(hr = d2d_load_precompiled_shape_shader(shape_info[i].resource_id,
+                &device->precompiled_shape_vs[i])))
         {
-            WARN("Failed to compile shader for shape type %#x, hr %#lx.\n", si->shape_type, hr);
+            WARN("Failed to load shader for shape type %#x, hr %#lx.\n", shape_info[i].shape_type, hr);
             return hr;
         }
-        device->precompiled_shape_vs[i] = compiled;
     }
 
-    if (FAILED(hr = D3DCompile(shape_ps_code, sizeof(shape_ps_code) - 1, "ps", NULL, NULL,
-            "main", "ps_4_0", 0, 0, &compiled, NULL)))
+    if (FAILED(hr = d2d_load_precompiled_shape_shader(IDR_D2D_SHAPE_PS, &device->precompiled_shape_ps)))
     {
-        WARN("Failed to compile the pixel shader, hr %#lx.\n", hr);
+        WARN("Failed to load the shape pixel shader, hr %#lx.\n", hr);
         return hr;
     }
-    device->precompiled_shape_ps = compiled;
 
     return S_OK;
 }

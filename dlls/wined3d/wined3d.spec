@@ -97,6 +97,7 @@
 @ cdecl wined3d_device_set_gamma_ramp(ptr long long ptr)
 @ cdecl wined3d_device_set_max_frame_latency(ptr long)
 @ cdecl wined3d_device_set_multithreaded(ptr)
+@ cdecl wined3d_device_use_sync_command_stream(ptr)
 @ cdecl wined3d_device_set_npatch_mode(ptr float)
 @ cdecl wined3d_device_set_software_vertex_processing(ptr long)
 @ cdecl wined3d_device_show_cursor(ptr long)

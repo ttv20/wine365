@@ -64,6 +64,7 @@ interface IWineDXGIDevice : IDXGIDevice3
         [in] BOOL needs_surface,
         [out] void **resource
     );
+    HRESULT use_sync_command_stream();
 }
 
 [

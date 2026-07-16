@@ -25,6 +25,9 @@
 WINE_DECLARE_DEBUG_CHANNEL(winediag);
 WINE_DEFAULT_DEBUG_CHANNEL(d2d);
 
+static const GUID d2d_IID_IWineDXGIDevice =
+        {0x3e1ff30b, 0xc951, 0x48c3, {0xb0, 0x10, 0x0f, 0xb4, 0x9f, 0x3d, 0xca, 0x71}};
+
 struct d2d_settings d2d_settings =
 {
     ~0u,    /* No ID2D1Factory version limit by default. */
@@ -383,11 +386,19 @@ static HRESULT STDMETHODCALLTYPE d2d_factory_CreateDrawingStateBlock(ID2D1Factor
 
 static HRESULT d2d_factory_get_device(struct d2d_factory *factory, ID3D10Device1 **device)
 {
+    char thread_id[16];
     HRESULT hr = S_OK;
 
-    if (!factory->device && FAILED(hr = D3D10CreateDevice1(NULL, D3D10_DRIVER_TYPE_HARDWARE, NULL, D3D10_CREATE_DEVICE_BGRA_SUPPORT,
-            D3D10_FEATURE_LEVEL_10_0, D3D10_1_SDK_VERSION, &factory->device)))
-        WARN("Failed to create device, hr %#lx.\n", hr);
+    if (!factory->device)
+    {
+        snprintf(thread_id, sizeof(thread_id), "%lu", GetCurrentThreadId());
+        SetEnvironmentVariableA("WINE_D2D_SYNC_DEVICE_THREAD", thread_id);
+        hr = D3D10CreateDevice1(NULL, D3D10_DRIVER_TYPE_HARDWARE, NULL, D3D10_CREATE_DEVICE_BGRA_SUPPORT,
+                D3D10_FEATURE_LEVEL_10_0, D3D10_1_SDK_VERSION, &factory->device);
+        SetEnvironmentVariableA("WINE_D2D_SYNC_DEVICE_THREAD", NULL);
+        if (FAILED(hr))
+            WARN("Failed to create device, hr %#lx.\n", hr);
+    }
 
     *device = factory->device;
     return hr;
@@ -530,8 +541,17 @@ static HRESULT STDMETHODCALLTYPE d2d_factory_CreateDCRenderTarget(ID2D1Factory7 
 HRESULT d2d_factory_create_device(ID2D1Factory1 *factory, IDXGIDevice *dxgi_device,
         bool allow_get_dxgi_device, REFIID iid, void **device)
 {
+    IWineDXGIDevice *wine_device;
     struct d2d_device *object;
     HRESULT hr;
+
+    if (GetEnvironmentVariableA("WINE_D2D_SYNC_EXTERNAL_DEVICE", NULL, 0)
+            && SUCCEEDED(IDXGIDevice_QueryInterface(dxgi_device,
+            &d2d_IID_IWineDXGIDevice, (void **)&wine_device)))
+    {
+        IWineDXGIDevice_use_sync_command_stream(wine_device);
+        IWineDXGIDevice_Release(wine_device);
+    }
 
     if (!(object = calloc(1, sizeof(*object))))
         return E_OUTOFMEMORY;

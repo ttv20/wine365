@@ -1,0 +1,6 @@
+#define IDR_D2D_SHAPE_VS_OUTLINE          100
+#define IDR_D2D_SHAPE_VS_BEZIER_OUTLINE  101
+#define IDR_D2D_SHAPE_VS_ARC_OUTLINE     102
+#define IDR_D2D_SHAPE_VS_TRIANGLE        103
+#define IDR_D2D_SHAPE_VS_CURVE           104
+#define IDR_D2D_SHAPE_PS                  105

@@ -31,6 +31,10 @@
 #include "d2d1_3.h"
 #include "d2d1effectauthor.h"
 #include "d3d11_1.h"
+struct wined3d_device_parent;
+struct wined3d_resource;
+struct wined3d_texture;
+#include "wine/winedxgi.h"
 #ifdef D2D1_INIT_GUID
 #include "initguid.h"
 #endif
@@ -650,6 +654,12 @@ HRESULT d2d_geometry_realization_init(struct d2d_geometry_realization *realizati
         ID2D1Factory *factory, ID2D1Geometry *geometry);
 struct d2d_geometry_realization *unsafe_impl_from_ID2D1GeometryRealization(ID2D1GeometryRealization *iface);
 
+struct d2d_shader_blob
+{
+    const void *code;
+    SIZE_T size;
+};
+
 struct d2d_device
 {
     ID2D1Device6 ID2D1Device6_iface;
@@ -658,8 +668,8 @@ struct d2d_device
     IDXGIDevice *dxgi_device;
     bool allow_get_dxgi_device;
 
-    ID3D10Blob *precompiled_shape_vs[D2D_SHAPE_TYPE_COUNT];
-    ID3D10Blob *precompiled_shape_ps;
+    struct d2d_shader_blob precompiled_shape_vs[D2D_SHAPE_TYPE_COUNT];
+    struct d2d_shader_blob precompiled_shape_ps;
 
     struct d2d_indexed_objects shaders;
 };

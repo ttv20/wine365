@@ -3649,6 +3649,8 @@ struct wined3d_cs *wined3d_cs_create(struct wined3d_device *device,
         const enum wined3d_feature_level *levels, unsigned int level_count)
 {
     const struct wined3d_d3d_info *d3d_info = &device->adapter->d3d_info;
+    char sync_device_thread[16];
+    bool force_single_threaded;
     struct wined3d_cs *cs;
 
     if (!(cs = calloc(1, sizeof(*cs))))
@@ -3673,7 +3675,13 @@ struct wined3d_cs *wined3d_cs_create(struct wined3d_device *device,
     if (!(cs->data = malloc(cs->data_size)))
         goto fail;
 
-    if (wined3d_settings.cs_multithreaded & WINED3D_CSMT_ENABLE)
+    force_single_threaded = GetEnvironmentVariableA("WINE_D2D_SYNC_DEVICE_THREAD",
+            sync_device_thread, sizeof(sync_device_thread))
+            && strtoul(sync_device_thread, NULL, 10) == GetCurrentThreadId();
+    if (force_single_threaded)
+        TRACE("Using a synchronous command stream for a Direct2D internal device.\n");
+
+    if (!force_single_threaded && wined3d_settings.cs_multithreaded & WINED3D_CSMT_ENABLE)
     {
         if (!d3d_info->fences)
         {
@@ -3682,7 +3690,7 @@ struct wined3d_cs *wined3d_cs_create(struct wined3d_device *device,
         }
     }
 
-    if (wined3d_settings.cs_multithreaded & WINED3D_CSMT_ENABLE
+    if (!force_single_threaded && wined3d_settings.cs_multithreaded & WINED3D_CSMT_ENABLE
             && !RtlIsCriticalSectionLockedByThread(NtCurrentTeb()->Peb->LoaderLock))
     {
         cs->c.ops = &wined3d_cs_mt_ops;
@@ -3739,6 +3747,32 @@ fail:
     state_cleanup(&cs->state);
     free(cs);
     return NULL;
+}
+
+void CDECL wined3d_device_use_sync_command_stream(struct wined3d_device *device)
+{
+    struct wined3d_cs *cs = device->cs;
+
+    if (!cs->thread)
+        return;
+
+    TRACE("Switching device %p command stream %p to synchronous execution.\n", device, cs);
+    wined3d_cs_emit_stop(cs);
+    WaitForSingleObject(cs->thread, INFINITE);
+    CloseHandle(cs->thread);
+    cs->thread = NULL;
+    cs->thread_id = 0;
+    if (cs->present_event)
+    {
+        CloseHandle(cs->present_event);
+        cs->present_event = NULL;
+    }
+    if (cs->event)
+    {
+        CloseHandle(cs->event);
+        cs->event = NULL;
+    }
+    cs->c.ops = &wined3d_cs_st_ops;
 }
 
 void wined3d_cs_destroy(struct wined3d_cs *cs)

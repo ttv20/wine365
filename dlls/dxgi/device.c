@@ -361,6 +361,17 @@ static HRESULT STDMETHODCALLTYPE dxgi_device_create_resource(IWineDXGIDevice *if
     return S_OK;
 }
 
+static HRESULT STDMETHODCALLTYPE dxgi_device_use_sync_command_stream(IWineDXGIDevice *iface)
+{
+    struct dxgi_device *device = impl_from_IWineDXGIDevice(iface);
+
+    TRACE("iface %p.\n", iface);
+    wined3d_mutex_lock();
+    wined3d_device_use_sync_command_stream(device->wined3d_device);
+    wined3d_mutex_unlock();
+    return S_OK;
+}
+
 static const struct IWineDXGIDeviceVtbl dxgi_device_vtbl =
 {
     /* IUnknown methods */
@@ -389,6 +400,7 @@ static const struct IWineDXGIDeviceVtbl dxgi_device_vtbl =
     dxgi_device_Trim,
     /* IWineDXGIDevice methods */
     dxgi_device_create_resource,
+    dxgi_device_use_sync_command_stream,
 };
 
 static inline struct dxgi_device *impl_from_IWineDXGISwapChainFactory(IWineDXGISwapChainFactory *iface)

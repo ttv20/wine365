@@ -1,0 +1,8 @@
+#include "shape_shaders.h"
+
+IDR_D2D_SHAPE_VS_OUTLINE         RCDATA "shape_vs_code_outline.dxbc"
+IDR_D2D_SHAPE_VS_BEZIER_OUTLINE RCDATA "shape_vs_code_bezier_outline.dxbc"
+IDR_D2D_SHAPE_VS_ARC_OUTLINE    RCDATA "shape_vs_code_arc_outline.dxbc"
+IDR_D2D_SHAPE_VS_TRIANGLE       RCDATA "shape_vs_code_triangle.dxbc"
+IDR_D2D_SHAPE_VS_CURVE          RCDATA "shape_vs_code_curve.dxbc"
+IDR_D2D_SHAPE_PS                RCDATA "shape_ps_code.dxbc"

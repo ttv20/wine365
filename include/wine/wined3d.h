@@ -2476,6 +2476,7 @@ void __cdecl wined3d_device_set_gamma_ramp(const struct wined3d_device *device,
         UINT swapchain_idx, uint32_t flags, const struct wined3d_gamma_ramp *ramp);
 void __cdecl wined3d_device_set_max_frame_latency(struct wined3d_device *device, unsigned int max_frame_latency);
 void __cdecl wined3d_device_set_multithreaded(struct wined3d_device *device);
+void __cdecl wined3d_device_use_sync_command_stream(struct wined3d_device *device);
 HRESULT __cdecl wined3d_device_set_npatch_mode(struct wined3d_device *device, float segments);
 void __cdecl wined3d_device_set_software_vertex_processing(struct wined3d_device *device, BOOL software);
 BOOL __cdecl wined3d_device_show_cursor(struct wined3d_device *device, BOOL show);

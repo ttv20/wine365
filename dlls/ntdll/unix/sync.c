@@ -2389,47 +2389,54 @@ NTSTATUS WINAPI NtSignalAndWaitForSingleObject( HANDLE signal, HANDLE wait,
 }
 
 
+static void throttle_office_net_ui_yield(void)
+{
+    const char *throttle;
+    struct timespec delay;
+    long milliseconds;
+
+    if (!(throttle = getenv( "WINE_NETUI_INPUT_THROTTLE" )) ||
+        !getenv( "WINE_NETUI_YIELD_ACTIVE" ))
+        return;
+
+    milliseconds = strtol( throttle, NULL, 10 );
+    if (milliseconds < 1) milliseconds = 1;
+    if (milliseconds > 20) milliseconds = 20;
+    delay.tv_sec = 0;
+    delay.tv_nsec = milliseconds * 1000000;
+    nanosleep( &delay, NULL );
+}
+
 /******************************************************************
  *		NtYieldExecution (NTDLL.@)
  */
 NTSTATUS WINAPI NtYieldExecution(void)
 {
-    const char *throttle;
-    struct timespec delay;
-    long milliseconds;
 #ifdef HAVE_SCHED_YIELD
 #ifdef RUSAGE_THREAD
     struct rusage u1, u2;
     int ret;
 #endif
-#endif
 
-    if ((throttle = getenv( "WINE_NETUI_INPUT_THROTTLE" )) &&
-        getenv( "WINE_NETUI_YIELD_ACTIVE" ))
-    {
-        milliseconds = strtol( throttle, NULL, 10 );
-        if (milliseconds < 1) milliseconds = 1;
-        if (milliseconds > 20) milliseconds = 20;
-        delay.tv_sec = 0;
-        delay.tv_nsec = milliseconds * 1000000;
-
-        /* Office modal galleries repeatedly yield while no peer is runnable.
-         * Linux sched_yield() then returns immediately and the UI thread spins
-         * at a full core. Keep this process opt-in and cap latency at 20 ms. */
-        nanosleep( &delay, NULL );
-        return STATUS_SUCCESS;
-    }
-#ifdef HAVE_SCHED_YIELD
 #ifdef RUSAGE_THREAD
     ret = getrusage( RUSAGE_THREAD, &u1 );
 #endif
     sched_yield();
 #ifdef RUSAGE_THREAD
     if (!ret) ret = getrusage( RUSAGE_THREAD, &u2 );
-    if (!ret && u1.ru_nvcsw == u2.ru_nvcsw && u1.ru_nivcsw == u2.ru_nivcsw) return STATUS_NO_YIELD_PERFORMED;
+    if (!ret && u1.ru_nvcsw == u2.ru_nvcsw && u1.ru_nivcsw == u2.ru_nivcsw)
+    {
+        /* Office modal galleries repeatedly yield while no peer is runnable.
+         * Linux sched_yield() then returns immediately and the UI thread spins
+         * at a full core. Delay that no-yield case, but preserve
+         * STATUS_NO_YIELD_PERFORMED: Office uses it to terminate the loop. */
+        throttle_office_net_ui_yield();
+        return STATUS_NO_YIELD_PERFORMED;
+    }
 #endif
     return STATUS_SUCCESS;
 #else
+    throttle_office_net_ui_yield();
     return STATUS_NO_YIELD_PERFORMED;
 #endif
 }
