@@ -109,10 +109,14 @@ static struct list xkb_layouts = LIST_INIT(xkb_layouts);
 /* These are only used from the wayland event thread and don't need locking */
 static struct rxkb_context *rxkb_context;
 static HKL keyboard_hkl; /* the HKL matching the currently active xkb group */
+static LANGID keyboard_lang; /* the language matching the currently active xkb group */
 
 void activate_keyboard_hkl(HWND hwnd, BOOL ime)
 {
-    HKL hkl = ime && !is_ime_hkl(keyboard_hkl) ? get_ime_hkl(LOWORD(keyboard_hkl)) : keyboard_hkl;
+    HKL hkl = keyboard_hkl;
+
+    if (ime && !is_ime_hkl(hkl))
+        hkl = get_ime_hkl(keyboard_lang ? keyboard_lang : LOWORD(hkl));
     TRACE("Changing keyboard layout to %p\n", hkl);
     NtUserPostMessage(hwnd, WM_INPUTLANGCHANGEREQUEST, 0 /*FIXME*/, (LPARAM)hkl);
 }
@@ -386,10 +390,10 @@ static inline LANGID langid_from_xkb_layout(const char *layout, size_t layout_le
     return MAKELANGID(LANG_NEUTRAL, SUBLANG_CUSTOM_UNSPECIFIED);
 };
 
-static HKL get_layout_hkl(struct layout *layout, LCID locale)
+static HKL get_layout_hkl(struct layout *layout)
 {
-    if (!layout->layout_id) return (HKL)(UINT_PTR)MAKELONG(locale, layout->lang);
-    else return (HKL)(UINT_PTR)MAKELONG(locale, 0xf000 | layout->layout_id);
+    if (!layout->layout_id) return (HKL)(UINT_PTR)MAKELONG(layout->lang, layout->lang);
+    else return (HKL)(UINT_PTR)MAKELONG(layout->lang, 0xf000 | layout->layout_id);
 }
 
 static void add_xkb_layout(const char *xkb_layout, struct xkb_keymap *xkb_keymap,
@@ -616,7 +620,6 @@ static void set_current_xkb_group(xkb_layout_index_t xkb_group)
 {
     struct wayland_text_input *text_input = &process_wayland.text_input;
     struct wayland_keyboard *keyboard = &process_wayland.keyboard;
-    LCID locale = LOWORD(NtUserGetKeyboardLayout(0));
     struct layout *layout;
     BOOL ime;
     HKL hkl;
@@ -626,7 +629,10 @@ static void set_current_xkb_group(xkb_layout_index_t xkb_group)
     LIST_FOR_EACH_ENTRY(layout, &xkb_layouts, struct layout, entry)
         if (layout->xkb_group == xkb_group) break;
     if (&layout->entry != &xkb_layouts)
-        hkl = get_layout_hkl(layout, locale);
+    {
+        hkl = get_layout_hkl(layout);
+        keyboard_lang = layout->lang;
+    }
     else
     {
         ERR("Failed to find Xkb Layout for group %d\n", xkb_group);
@@ -639,7 +645,7 @@ static void set_current_xkb_group(xkb_layout_index_t xkb_group)
     keyboard_hkl = hkl;
 
     pthread_mutex_lock(&text_input->mutex);
-    ime = text_input->focused_hwnd == keyboard->focused_hwnd;
+    ime = text_input->focused_hwnd && text_input->focused_hwnd == keyboard->focused_hwnd;
     pthread_mutex_unlock(&text_input->mutex);
 
     activate_keyboard_hkl(keyboard->focused_hwnd, ime);
@@ -1012,7 +1018,7 @@ const KBDTABLES *WAYLAND_KbdLayerDescriptor(HKL hkl)
     pthread_mutex_lock(&xkb_layouts_mutex);
 
     LIST_FOR_EACH_ENTRY(layout, &xkb_layouts, struct layout, entry)
-        if (hkl == get_layout_hkl(layout, LOWORD(hkl))) break;
+        if (hkl == get_layout_hkl(layout)) break;
     if (&layout->entry == &xkb_layouts) layout = NULL;
     else xkb_layout_addref(layout);
 
