@@ -2391,13 +2391,48 @@ NTSTATUS WINAPI NtSignalAndWaitForSingleObject( HANDLE signal, HANDLE wait,
 
 static void throttle_office_net_ui_yield(void)
 {
+    static __thread struct timespec active_since, previous;
+    static __thread unsigned int rapid_yields;
+    long long since_active, since_previous;
     const char *throttle;
-    struct timespec delay;
+    struct timespec current, delay;
     long milliseconds;
 
     if (!(throttle = getenv( "WINE_NETUI_INPUT_THROTTLE" )) ||
         !getenv( "WINE_NETUI_YIELD_ACTIVE" ))
+    {
+        rapid_yields = 0;
+        active_since.tv_sec = active_since.tv_nsec = 0;
+        previous.tv_sec = previous.tv_nsec = 0;
         return;
+    }
+
+    clock_gettime( CLOCK_MONOTONIC, &current );
+    since_previous = (current.tv_sec - previous.tv_sec) * 1000000000ll
+            + current.tv_nsec - previous.tv_nsec;
+
+    /* A newly shown gallery uses these yields as progress points while it
+     * renders its thumbnails.  Give that productive phase a short grace
+     * period; otherwise the CPU-spin workaround becomes the opening delay. */
+    if (!previous.tv_sec || since_previous < 0 || since_previous > 100000000)
+    {
+        active_since = current;
+        rapid_yields = 0;
+    }
+    previous = current;
+    since_active = (current.tv_sec - active_since.tv_sec) * 1000000000ll
+            + current.tv_nsec - active_since.tv_nsec;
+    if (since_active < 3000000000ll)
+        return;
+
+    /* Once the gallery is open, only pace a genuine tight yield loop. */
+    if (since_previous <= 1000000)
+        ++rapid_yields;
+    else
+        rapid_yields = 0;
+    if (rapid_yields < 8)
+        return;
+    rapid_yields = 0;
 
     milliseconds = strtol( throttle, NULL, 10 );
     if (milliseconds < 1) milliseconds = 1;
@@ -2405,6 +2440,7 @@ static void throttle_office_net_ui_yield(void)
     delay.tv_sec = 0;
     delay.tv_nsec = milliseconds * 1000000;
     nanosleep( &delay, NULL );
+    clock_gettime( CLOCK_MONOTONIC, &previous );
 }
 
 /******************************************************************
@@ -2413,6 +2449,14 @@ static void throttle_office_net_ui_yield(void)
 NTSTATUS WINAPI NtYieldExecution(void)
 {
 #ifdef HAVE_SCHED_YIELD
+    /* The visible Office gallery loop expects the native no-yield status.
+     * Avoid two getrusage() calls and sched_yield() for every thumbnail-loop
+     * iteration when this UI-thread-only path is active. */
+    if (getenv( "WINE_NETUI_INPUT_THROTTLE" ) && getenv( "WINE_NETUI_YIELD_ACTIVE" ))
+    {
+        throttle_office_net_ui_yield();
+        return STATUS_NO_YIELD_PERFORMED;
+    }
 #ifdef RUSAGE_THREAD
     struct rusage u1, u2;
     int ret;

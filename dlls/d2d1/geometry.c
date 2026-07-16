@@ -32,7 +32,7 @@ WINE_DEFAULT_DEBUG_CHANNEL(d2d);
 /* Office can submit a small path whose overlapping Bezier control triangles
  * keep producing more overlaps after every split.  Letting that pathological
  * case grow without a bound can block the UI thread for tens of seconds. */
-#define D2D_BEZIER_OVERLAP_SPLIT_LIMIT 2048
+#define D2D_BEZIER_OVERLAP_SPLIT_LIMIT 32
 
 static const D2D1_MATRIX_3X2_F identity =
 {{{
