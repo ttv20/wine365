@@ -30,6 +30,8 @@ static const D2D1_MATRIX_3X2_F identity =
     0.0f, 0.0f,
 }}};
 
+static void d2d_glyph_bitmap_cache_cleanup(struct d2d_glyph_bitmap_cache *cache);
+
 static HRESULT d2d_device_context_ensure_shape_resources(struct d2d_device_context *render_target,
         enum d2d_shape_type shape_type);
 
@@ -181,20 +183,28 @@ static void d2d_device_context_draw(struct d2d_device_context *render_target, en
     vp.MinDepth = 0.0f;
     vp.MaxDepth = 1.0f;
 
-    if (render_target->cs)
+    if (render_target->cs && !render_target->batched_draw)
         EnterCriticalSection(render_target->cs);
 
     if (FAILED(hr = d2d_device_context_ensure_shape_resources(render_target, shape_type)))
     {
         WARN("Failed to create resources for shape type %#x, hr %#lx.\n", shape_type, hr);
         render_target->error.code = hr;
-        if (render_target->cs)
+        if (render_target->cs && !render_target->batched_draw)
             LeaveCriticalSection(render_target->cs);
         return;
     }
 
-    ID3D11Device1_GetImmediateContext1(device, &context);
-    ID3D11DeviceContext1_SwapDeviceContextState(context, render_target->d3d_state, &prev_state);
+    if (render_target->batched_draw)
+    {
+        context = render_target->batched_context;
+        prev_state = NULL;
+    }
+    else
+    {
+        ID3D11Device1_GetImmediateContext1(device, &context);
+        ID3D11DeviceContext1_SwapDeviceContextState(context, render_target->d3d_state, &prev_state);
+    }
 
     ID3D11DeviceContext1_IASetInputLayout(context, shape_resources->il);
     ID3D11DeviceContext1_IASetPrimitiveTopology(context, D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
@@ -243,12 +253,15 @@ static void d2d_device_context_draw(struct d2d_device_context *render_target, en
     else
         ID3D11DeviceContext1_Draw(context, index_count, 0);
 
-    ID3D11DeviceContext1_SwapDeviceContextState(context, prev_state, NULL);
-    ID3D11DeviceContext1_Release(context);
-    ID3DDeviceContextState_Release(prev_state);
+    if (!render_target->batched_draw)
+    {
+        ID3D11DeviceContext1_SwapDeviceContextState(context, prev_state, NULL);
+        ID3D11DeviceContext1_Release(context);
+        ID3DDeviceContextState_Release(prev_state);
 
-    if (render_target->cs)
-        LeaveCriticalSection(render_target->cs);
+        if (render_target->cs)
+            LeaveCriticalSection(render_target->cs);
+    }
 }
 
 static void d2d_device_context_set_error(struct d2d_device_context *context, HRESULT code)
@@ -267,6 +280,55 @@ static inline struct d2d_device_context *impl_from_IUnknown(IUnknown *iface)
 static inline struct d2d_device_context *impl_from_ID2D1DeviceContext(ID2D1DeviceContext6 *iface)
 {
     return CONTAINING_RECORD(iface, struct d2d_device_context, ID2D1DeviceContext6_iface);
+}
+
+static void d2d_device_context_end_batch(struct d2d_device_context *context)
+{
+    if (!context->batched_draw)
+        return;
+
+    ID3D11DeviceContext1_SwapDeviceContextState(context->batched_context,
+            context->batched_prev_state, NULL);
+    ID3DDeviceContextState_Release(context->batched_prev_state);
+    ID3D11DeviceContext1_Release(context->batched_context);
+    context->batched_prev_state = NULL;
+    context->batched_context = NULL;
+    context->batched_draw = FALSE;
+    if (context->cs)
+        LeaveCriticalSection(context->cs);
+}
+
+BOOL d2d_device_context_prepare_reuse_target(ID2D1RenderTarget *iface)
+{
+    struct d2d_device_context *context = impl_from_ID2D1DeviceContext((ID2D1DeviceContext6 *)iface);
+    BOOL clean = !context->batched_draw && !context->draw_depth && !context->invalid_draw_sequence
+            && !context->clip_stack.count && !context->target.hdc;
+
+    d2d_device_context_end_batch(context);
+    return clean;
+}
+
+void d2d_device_context_reset_reused_target(ID2D1RenderTarget *iface, float dpi_x, float dpi_y)
+{
+    struct d2d_device_context *context = impl_from_ID2D1DeviceContext((ID2D1DeviceContext6 *)iface);
+
+    if (context->text_rendering_params)
+    {
+        IDWriteRenderingParams_Release(context->text_rendering_params);
+        context->text_rendering_params = NULL;
+    }
+
+    memset(&context->drawing_state, 0, sizeof(context->drawing_state));
+    context->drawing_state.transform = identity;
+    memset(&context->error, 0, sizeof(context->error));
+    context->draw_depth = 0;
+    context->invalid_draw_sequence = FALSE;
+    context->clip_stack.count = 0;
+
+    if (dpi_x == 0.0f && dpi_y == 0.0f)
+        dpi_x = dpi_y = 96.0f;
+    context->desc.dpiX = dpi_x;
+    context->desc.dpiY = dpi_y;
 }
 
 static HRESULT STDMETHODCALLTYPE d2d_device_context_inner_QueryInterface(IUnknown *iface, REFIID iid, void **out)
@@ -363,6 +425,7 @@ static ULONG STDMETHODCALLTYPE d2d_device_context_inner_Release(IUnknown *iface)
         ID2D1Factory_Release(context->factory);
         ID2D1Device6_Release(&context->device->ID2D1Device6_iface);
         d2d_device_indexed_objects_clear(&context->vertex_buffers);
+        d2d_glyph_bitmap_cache_cleanup(&context->glyph_bitmap_cache);
         free(context);
     }
 
@@ -1537,6 +1600,147 @@ static HRESULT d2d_device_context_get_glyph_run_analysis(struct d2d_device_conte
     return S_OK;
 }
 
+static void d2d_glyph_bitmap_cache_cleanup(struct d2d_glyph_bitmap_cache *cache)
+{
+    if (cache->font_face)
+        IDWriteFontFace_Release(cache->font_face);
+    if (cache->rendering_params)
+        IDWriteRenderingParams_Release(cache->rendering_params);
+    free(cache->indices);
+    free(cache->advances);
+    free(cache->offsets);
+    free(cache->values);
+    memset(cache, 0, sizeof(*cache));
+}
+
+static BOOL d2d_glyph_bitmap_cache_matches(const struct d2d_glyph_bitmap_cache *cache,
+        const struct d2d_device_context *context, D2D1_POINT_2F baseline_origin,
+        const DWRITE_GLYPH_RUN *run, DWRITE_RENDERING_MODE rendering_mode,
+        DWRITE_MEASURING_MODE measuring_mode, DWRITE_TEXT_ANTIALIAS_MODE antialias_mode)
+{
+    if (!cache->values || cache->font_face != run->fontFace || cache->glyph_count != run->glyphCount
+            || cache->font_em_size != run->fontEmSize || cache->bidi_level != run->bidiLevel
+            || cache->sideways != run->isSideways || cache->has_advances != !!run->glyphAdvances
+            || cache->has_offsets != !!run->glyphOffsets
+            || memcmp(&cache->baseline_origin, &baseline_origin, sizeof(baseline_origin))
+            || memcmp(&cache->transform, &context->drawing_state.transform, sizeof(cache->transform))
+            || cache->rendering_mode != rendering_mode || cache->measuring_mode != measuring_mode
+            || cache->antialias_mode != antialias_mode
+            || memcmp(cache->indices, run->glyphIndices, run->glyphCount * sizeof(*run->glyphIndices)))
+        return FALSE;
+    if (run->glyphAdvances && memcmp(cache->advances, run->glyphAdvances,
+            run->glyphCount * sizeof(*run->glyphAdvances)))
+        return FALSE;
+    if (run->glyphOffsets && memcmp(cache->offsets, run->glyphOffsets,
+            run->glyphCount * sizeof(*run->glyphOffsets)))
+        return FALSE;
+    return TRUE;
+}
+
+static BOOL d2d_device_context_draw_cached_glyph(struct d2d_device_context *context,
+        D2D1_POINT_2F baseline_origin, const DWRITE_GLYPH_RUN *run, ID2D1Brush *brush,
+        DWRITE_MEASURING_MODE measuring_mode)
+{
+    struct d2d_glyph_bitmap_cache *cache = &context->glyph_bitmap_cache;
+    struct d2d_brush *brush_impl = unsafe_impl_from_ID2D1Brush(brush);
+    IDWriteRenderingParams *rendering_params = context->text_rendering_params
+            ? context->text_rendering_params : context->default_text_rendering_params;
+    D2D1_COLOR_F colour;
+
+    if (!brush_impl || brush_impl->type != D2D_BRUSH_TYPE_SOLID || !context->ops
+            || !context->ops->queue_cpu_glyph || context->clip_stack.count || !cache->values
+            || cache->text_antialias_mode != context->drawing_state.textAntialiasMode
+            || cache->rendering_params != rendering_params
+            || !d2d_glyph_bitmap_cache_matches(cache, context, baseline_origin, run,
+            cache->rendering_mode, measuring_mode, cache->antialias_mode))
+        return FALSE;
+
+    colour = brush_impl->u.solid.color;
+    colour.a *= brush_impl->opacity;
+    return context->ops->queue_cpu_glyph(context->outer_unknown,
+            &cache->bounds, cache->values, cache->pitch, &colour);
+}
+
+static void d2d_glyph_bitmap_cache_store(struct d2d_glyph_bitmap_cache *cache,
+        const struct d2d_device_context *context, D2D1_POINT_2F baseline_origin,
+        const DWRITE_GLYPH_RUN *run, DWRITE_RENDERING_MODE rendering_mode,
+        DWRITE_MEASURING_MODE measuring_mode, DWRITE_TEXT_ANTIALIAS_MODE antialias_mode,
+        const RECT *bounds, const BYTE *values, unsigned int pitch)
+{
+    unsigned int height = bounds->bottom - bounds->top;
+    size_t values_size = (size_t)pitch * height;
+    void *allocation;
+
+    if (cache->font_face)
+        IDWriteFontFace_Release(cache->font_face);
+    if (cache->rendering_params)
+        IDWriteRenderingParams_Release(cache->rendering_params);
+    cache->font_face = NULL;
+    cache->rendering_params = NULL;
+    cache->glyph_count = 0; /* Invalidate while replacing the cached run. */
+
+    if (run->glyphCount > cache->glyph_capacity)
+    {
+        if (!(allocation = realloc(cache->indices, run->glyphCount * sizeof(*run->glyphIndices))))
+            goto failed;
+        cache->indices = allocation;
+        if (!(allocation = realloc(cache->advances, run->glyphCount * sizeof(*run->glyphAdvances))))
+            goto failed;
+        cache->advances = allocation;
+        if (!(allocation = realloc(cache->offsets, run->glyphCount * sizeof(*run->glyphOffsets))))
+            goto failed;
+        cache->offsets = allocation;
+        cache->glyph_capacity = run->glyphCount;
+    }
+    else
+    {
+        if (run->glyphAdvances && !cache->advances
+                && !(cache->advances = malloc(cache->glyph_capacity * sizeof(*run->glyphAdvances))))
+            goto failed;
+        if (run->glyphOffsets && !cache->offsets
+                && !(cache->offsets = malloc(cache->glyph_capacity * sizeof(*run->glyphOffsets))))
+            goto failed;
+    }
+    if (values_size > cache->values_capacity)
+    {
+        if (!(allocation = realloc(cache->values, values_size)))
+            goto failed;
+        cache->values = allocation;
+        cache->values_capacity = values_size;
+    }
+
+    cache->font_face = run->fontFace;
+    IDWriteFontFace_AddRef(cache->font_face);
+    cache->glyph_count = run->glyphCount;
+    cache->font_em_size = run->fontEmSize;
+    cache->bidi_level = run->bidiLevel;
+    cache->sideways = run->isSideways;
+    cache->has_advances = !!run->glyphAdvances;
+    cache->has_offsets = !!run->glyphOffsets;
+    cache->baseline_origin = baseline_origin;
+    cache->transform = context->drawing_state.transform;
+    cache->rendering_mode = rendering_mode;
+    cache->measuring_mode = measuring_mode;
+    cache->antialias_mode = antialias_mode;
+    cache->text_antialias_mode = context->drawing_state.textAntialiasMode;
+    cache->rendering_params = context->text_rendering_params
+            ? context->text_rendering_params : context->default_text_rendering_params;
+    IDWriteRenderingParams_AddRef(cache->rendering_params);
+    cache->bounds = *bounds;
+    cache->pitch = pitch;
+    cache->height = height;
+    memcpy(cache->indices, run->glyphIndices, run->glyphCount * sizeof(*run->glyphIndices));
+    if (run->glyphAdvances)
+        memcpy(cache->advances, run->glyphAdvances, run->glyphCount * sizeof(*run->glyphAdvances));
+    if (run->glyphOffsets)
+        memcpy(cache->offsets, run->glyphOffsets, run->glyphCount * sizeof(*run->glyphOffsets));
+    memcpy(cache->values, values, values_size);
+    return;
+
+failed:
+    d2d_glyph_bitmap_cache_cleanup(cache);
+}
+
 static void d2d_device_context_draw_glyph_run_bitmap(struct d2d_device_context *context,
         D2D1_POINT_2F baseline_origin, const DWRITE_GLYPH_RUN *glyph_run, ID2D1Brush *brush,
         DWRITE_RENDERING_MODE rendering_mode, DWRITE_MEASURING_MODE measuring_mode,
@@ -1553,11 +1757,14 @@ static void d2d_device_context_draw_glyph_run_bitmap(struct d2d_device_context *
     void *opacity_values = NULL;
     size_t opacity_values_size;
     D2D1_SIZE_U bitmap_size;
+    struct d2d_brush *brush_impl;
+    D2D1_COLOR_F colour;
     float scale_x, scale_y;
     D2D1_RECT_F run_rect;
     RECT bounds;
     HRESULT hr;
 
+    brush_impl = unsafe_impl_from_ID2D1Brush(brush);
     hr = d2d_device_context_get_glyph_run_analysis(context, baseline_origin, glyph_run,
             rendering_mode, measuring_mode, antialias_mode, &texture_type, &analysis);
     if (FAILED(hr))
@@ -1593,6 +1800,23 @@ static void d2d_device_context_draw_glyph_run_bitmap(struct d2d_device_context *
     {
         ERR("Failed to create alpha texture, hr %#lx.\n", hr);
         goto done;
+    }
+
+    if (texture_type == DWRITE_TEXTURE_ALIASED_1x1 && brush_impl
+            && brush_impl->type == D2D_BRUSH_TYPE_SOLID && context->ops
+            && context->ops->queue_cpu_glyph && !context->clip_stack.count)
+    {
+        colour = brush_impl->u.solid.color;
+        colour.a *= brush_impl->opacity;
+        if (context->ops->queue_cpu_glyph(context->outer_unknown, &bounds,
+                opacity_values, bitmap_size.width, &colour))
+        {
+            d2d_glyph_bitmap_cache_store(&context->glyph_bitmap_cache, context,
+                    baseline_origin, glyph_run,
+                    rendering_mode, measuring_mode, antialias_mode,
+                    &bounds, opacity_values, bitmap_size.width);
+            goto done;
+        }
     }
 
     bitmap_desc.pixelFormat.format = DXGI_FORMAT_A8_UNORM;
@@ -1751,6 +1975,9 @@ static void d2d_device_context_draw_glyph_run(struct d2d_device_context *context
                 glyph_run_desc, brush, measuring_mode);
         return;
     }
+
+    if (d2d_device_context_draw_cached_glyph(context, baseline_origin, glyph_run, brush, measuring_mode))
+        return;
 
     if (FAILED(hr = d2d_device_context_get_text_rendering_mode(context, glyph_run, measuring_mode,
             &antialias_mode, &rendering_mode)))
@@ -2131,10 +2358,27 @@ static void STDMETHODCALLTYPE d2d_device_context_BeginDraw(ID2D1DeviceContext6 *
 
     TRACE("iface %p.\n", iface);
 
+    if (context->draw_depth++)
+        context->invalid_draw_sequence = TRUE;
+
     d2d_device_context_atlas_log_rect(context, "BeginDraw", NULL);
 
     if (context->target.type == D2D_TARGET_COMMAND_LIST)
         d2d_command_list_begin_draw(context->target.command_list, context);
+
+    /* Office galleries draw hundreds of tiny WIC bitmaps. Avoid swapping the
+     * shared immediate-context state around every primitive in one transaction. */
+    if (context->ops && context->ops->batch_small_draws
+            && context->pixel_size.width <= 32 && context->pixel_size.height <= 32
+            && !context->batched_draw)
+    {
+        if (context->cs)
+            EnterCriticalSection(context->cs);
+        ID3D11Device1_GetImmediateContext1(context->d3d_device, &context->batched_context);
+        ID3D11DeviceContext1_SwapDeviceContextState(context->batched_context,
+                context->d3d_state, &context->batched_prev_state);
+        context->batched_draw = TRUE;
+    }
 
     memset(&context->error, 0, sizeof(context->error));
 }
@@ -2147,6 +2391,11 @@ static HRESULT STDMETHODCALLTYPE d2d_device_context_EndDraw(ID2D1DeviceContext6 
 
     TRACE("iface %p, tag1 %p, tag2 %p.\n", iface, tag1, tag2);
 
+    if (context->draw_depth)
+        --context->draw_depth;
+    else
+        context->invalid_draw_sequence = TRUE;
+
     if (tag1)
         *tag1 = context->error.tag1;
     if (tag2)
@@ -2154,6 +2403,10 @@ static HRESULT STDMETHODCALLTYPE d2d_device_context_EndDraw(ID2D1DeviceContext6 
 
     if (context->target.type == D2D_TARGET_COMMAND_LIST)
         return context->error.code;
+
+    /* Restore the D3D context before WIC readback. CopyResource/Map may wait
+     * for work which cannot complete while the immediate context is borrowed. */
+    d2d_device_context_end_batch(context);
 
     if (context->ops && context->ops->device_context_present)
     {

@@ -148,6 +148,9 @@ struct d2d_vs_cb
 struct d2d_device_context_ops
 {
     HRESULT (*device_context_present)(IUnknown *outer_unknown);
+    BOOL (*queue_cpu_glyph)(IUnknown *outer_unknown, const RECT *bounds,
+            const BYTE *values, unsigned int pitch, const D2D1_COLOR_F *colour);
+    BOOL batch_small_draws;
 };
 
 enum d2d_device_context_sampler_limits
@@ -174,6 +177,33 @@ struct d2d_indexed_objects
     size_t count;
 };
 
+struct d2d_glyph_bitmap_cache
+{
+    IDWriteFontFace *font_face;
+    UINT16 *indices;
+    FLOAT *advances;
+    DWRITE_GLYPH_OFFSET *offsets;
+    UINT32 glyph_count;
+    UINT32 glyph_capacity;
+    size_t values_capacity;
+    FLOAT font_em_size;
+    UINT32 bidi_level;
+    BOOL sideways;
+    BOOL has_advances;
+    BOOL has_offsets;
+    D2D1_POINT_2F baseline_origin;
+    D2D1_MATRIX_3X2_F transform;
+    DWRITE_RENDERING_MODE rendering_mode;
+    DWRITE_MEASURING_MODE measuring_mode;
+    DWRITE_TEXT_ANTIALIAS_MODE antialias_mode;
+    D2D1_TEXT_ANTIALIAS_MODE text_antialias_mode;
+    IDWriteRenderingParams *rendering_params;
+    RECT bounds;
+    unsigned int pitch;
+    unsigned int height;
+    BYTE *values;
+};
+
 struct d2d_device_context
 {
     ID2D1DeviceContext6 ID2D1DeviceContext6_iface;
@@ -190,6 +220,11 @@ struct d2d_device_context
     struct d2d_device *device;
     ID3D11Device1 *d3d_device;
     ID3DDeviceContextState *d3d_state;
+    ID3D11DeviceContext1 *batched_context;
+    ID3DDeviceContextState *batched_prev_state;
+    BOOL batched_draw;
+    unsigned int draw_depth;
+    BOOL invalid_draw_sequence;
     struct
     {
         ID2D1Image *object;
@@ -225,8 +260,11 @@ struct d2d_device_context
     struct d2d_clip_stack clip_stack;
 
     struct d2d_indexed_objects vertex_buffers;
+    struct d2d_glyph_bitmap_cache glyph_bitmap_cache;
 };
 
+BOOL d2d_device_context_prepare_reuse_target(ID2D1RenderTarget *target);
+void d2d_device_context_reset_reused_target(ID2D1RenderTarget *target, float dpi_x, float dpi_y);
 HRESULT d2d_d3d_create_render_target(struct d2d_device *device, IDXGISurface *surface, IUnknown *outer_unknown,
         const struct d2d_device_context_ops *ops, const D2D1_RENDER_TARGET_PROPERTIES *desc,
         void **render_target);
@@ -236,16 +274,31 @@ static inline BOOL d2d_device_context_is_dxgi_target(const struct d2d_device_con
     return !context->ops;
 }
 
+struct d2d_wic_cpu_glyph
+{
+    struct d2d_wic_cpu_glyph *next;
+    RECT bounds;
+    D2D1_COLOR_F colour;
+    unsigned int pitch;
+    BYTE values[];
+};
+
 struct d2d_wic_render_target
 {
     IUnknown IUnknown_iface;
     LONG refcount;
 
     IDXGISurface *dxgi_surface;
+    ID2D1Factory1 *factory;
+    ID3D10Device1 *device;
+    D2D1_RENDER_TARGET_PROPERTIES desc;
+    struct d2d_wic_render_target *pool_next;
     ID2D1RenderTarget *dxgi_target;
     IUnknown *dxgi_inner;
     ID3D10Texture2D *readback_texture;
     IWICBitmap *bitmap;
+    struct d2d_wic_cpu_glyph *cpu_glyphs;
+    struct d2d_wic_cpu_glyph **cpu_glyph_tail;
 
     unsigned int width;
     unsigned int height;
@@ -254,6 +307,8 @@ struct d2d_wic_render_target
 
 HRESULT d2d_wic_render_target_init(struct d2d_wic_render_target *render_target, ID2D1Factory1 *factory,
         ID3D10Device1 *d3d_device, IWICBitmap *bitmap, const D2D1_RENDER_TARGET_PROPERTIES *desc);
+BOOL d2d_wic_render_target_reuse(ID2D1Factory1 *factory, ID3D10Device1 *device,
+        IWICBitmap *bitmap, const D2D1_RENDER_TARGET_PROPERTIES *desc, ID2D1RenderTarget **target);
 
 struct d2d_dc_render_target
 {

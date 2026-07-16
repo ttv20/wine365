@@ -414,14 +414,14 @@ static HRESULT STDMETHODCALLTYPE d2d_factory_CreateWicBitmapRenderTarget(ID2D1Fa
 
     TRACE("iface %p, target %p, desc %p, render_target %p.\n", iface, target, desc, render_target);
 
+    if (FAILED(hr = d2d_factory_get_device(factory, &device)))
+        return hr;
+
+    if (d2d_wic_render_target_reuse((ID2D1Factory1 *)iface, device, target, desc, render_target))
+        return S_OK;
+
     if (!(object = calloc(1, sizeof(*object))))
         return E_OUTOFMEMORY;
-
-    if (FAILED(hr = d2d_factory_get_device(factory, &device)))
-    {
-        free(object);
-        return hr;
-    }
 
     if (FAILED(hr = d2d_wic_render_target_init(object, (ID2D1Factory1 *)iface, device, target, desc)))
     {
