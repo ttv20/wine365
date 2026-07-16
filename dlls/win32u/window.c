@@ -1997,6 +1997,48 @@ static BOOL is_office_net_ui_tool_window( HWND hwnd )
     return !wcscmp( buffer, net_ui_tool_window );
 }
 
+static BOOL is_word_main_window( HWND hwnd )
+{
+    static const WCHAR opus_app[] = {'O','p','u','s','A','p','p',0};
+    WCHAR buffer[64];
+    UNICODE_STRING name = {0, sizeof(buffer), buffer};
+    INT len;
+
+    if ((len = NtUserGetClassName( hwnd, FALSE, &name )) <= 0 || len >= ARRAY_SIZE(buffer))
+        return FALSE;
+    buffer[len] = 0;
+    return !wcscmp( buffer, opus_app );
+}
+
+static BOOL is_office_surface_window( HWND hwnd )
+{
+    return is_office_net_ui_tool_window( hwnd ) || is_word_main_window( hwnd );
+}
+
+static int office_caption_button_hittest( HWND hwnd, POINT point, int hittest )
+{
+    RECT rect;
+    DWORD style;
+    UINT dpi;
+    int width, height;
+
+    if (hittest != HTCAPTION || !is_word_main_window( hwnd ) ||
+        !get_window_rect( hwnd, &rect, get_dpi_for_window( hwnd ) ))
+        return hittest;
+
+    style = NtUserGetWindowLongW( hwnd, GWL_STYLE );
+    if (!(style & WS_SYSMENU)) return hittest;
+    dpi = get_dpi_for_window( hwnd );
+    width = (46 * dpi + USER_DEFAULT_SCREEN_DPI / 2) / USER_DEFAULT_SCREEN_DPI;
+    height = (32 * dpi + USER_DEFAULT_SCREEN_DPI / 2) / USER_DEFAULT_SCREEN_DPI;
+    if (point.y < rect.top || point.y >= rect.top + height || point.x >= rect.right)
+        return hittest;
+    if (point.x >= rect.right - width) return HTCLOSE;
+    if ((style & WS_MAXIMIZEBOX) && point.x >= rect.right - 2 * width) return HTMAXBUTTON;
+    if ((style & WS_MINIMIZEBOX) && point.x >= rect.right - 3 * width) return HTMINBUTTON;
+    return hittest;
+}
+
 static HWND office_net_ui_yield_window;
 
 static void update_office_net_ui_yield_throttle( HWND hwnd, BOOL visible )
@@ -2524,7 +2566,7 @@ int WINAPI NtUserSetWindowRgn( HWND hwnd, HRGN hrgn, BOOL redraw )
             redundant_surface_region = box.left <= 0 && box.top <= 0 &&
                                        box.right >= window_rect.right - window_rect.left &&
                                        box.bottom >= window_rect.bottom - window_rect.top &&
-                                       is_office_net_ui_tool_window( hwnd );
+                                       is_office_surface_window( hwnd );
             if (getenv( "WINE_FULL_REGION_DIAG" ))
                 WARN( "OFFICE_SET_REGION hwnd %p box %s window %s redundant %u.\n", hwnd,
                       wine_dbgstr_rect( &box ), wine_dbgstr_rect( &window_rect ),
@@ -2837,6 +2879,7 @@ HWND window_from_point( HWND hwnd, POINT pt, INT *hittest, BOOL send_nchittest )
         }
         win_pt = map_dpi_point( pt, dpi, get_dpi_for_window( list[i] ));
         res = send_message( list[i], WM_NCHITTEST, 0, MAKELPARAM( win_pt.x, win_pt.y ));
+        res = office_caption_button_hittest( list[i], win_pt, res );
         if (res != HTTRANSPARENT)
         {
             *hittest = res;  /* Found the window */

@@ -140,6 +140,43 @@ cleanup:
     DestroyWindow(hwnd);
 }
 
+static void test_DWMWA_CAPTION_BUTTON_BOUNDS(void)
+{
+    RECT rect;
+    HWND hwnd, child;
+    BOOL enabled;
+    HRESULT hr;
+
+    hwnd = CreateWindowW(L"static", L"static", WS_OVERLAPPEDWINDOW | WS_POPUP | WS_VISIBLE,
+            10, 10, 400, 200, NULL, NULL, NULL, NULL);
+    child = CreateWindowW(L"static", L"child", WS_CHILD | WS_VISIBLE,
+            0, 0, 50, 50, hwnd, NULL, NULL, NULL);
+
+    DwmIsCompositionEnabled(&enabled);
+    hr = DwmGetWindowAttribute(hwnd, DWMWA_CAPTION_BUTTON_BOUNDS, &rect, sizeof(rect));
+    if (!enabled)
+    {
+        ok(hr == E_HANDLE, "Got hr %#lx.\n", hr);
+        goto cleanup;
+    }
+
+    ok(hr == S_OK, "Got hr %#lx.\n", hr);
+    ok(rect.left >= 0 && rect.right <= 400 && rect.left < rect.right,
+            "Got invalid horizontal bounds %s.\n", wine_dbgstr_rect(&rect));
+    ok(rect.top == 0 && rect.bottom > rect.top,
+            "Got invalid vertical bounds %s.\n", wine_dbgstr_rect(&rect));
+    hr = DwmGetWindowAttribute(hwnd, DWMWA_CAPTION_BUTTON_BOUNDS, NULL, sizeof(rect));
+    ok(hr == E_INVALIDARG, "Got hr %#lx.\n", hr);
+    hr = DwmGetWindowAttribute(hwnd, DWMWA_CAPTION_BUTTON_BOUNDS, &rect, sizeof(BOOL));
+    ok(hr == E_NOT_SUFFICIENT_BUFFER, "Got hr %#lx.\n", hr);
+    hr = DwmGetWindowAttribute(child, DWMWA_CAPTION_BUTTON_BOUNDS, &rect, sizeof(rect));
+    ok(hr == E_HANDLE, "Got hr %#lx.\n", hr);
+
+cleanup:
+    DestroyWindow(child);
+    DestroyWindow(hwnd);
+}
+
 static void WINAPI apc_func(ULONG_PTR apc_count)
 {
     ++*(unsigned int *)apc_count;
@@ -175,5 +212,6 @@ START_TEST(dwmapi)
     test_DwmIsCompositionEnabled();
     test_DwmGetCompositionTimingInfo();
     test_DWMWA_EXTENDED_FRAME_BOUNDS();
+    test_DWMWA_CAPTION_BUTTON_BOUNDS();
     test_DwmFlush();
 }

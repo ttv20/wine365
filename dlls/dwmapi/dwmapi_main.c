@@ -195,6 +195,37 @@ HRESULT WINAPI DwmGetWindowAttribute(HWND hwnd, DWORD attribute, PVOID pv_attrib
         return E_HANDLE;
 
     switch (attribute) {
+    case DWMWA_CAPTION_BUTTON_BOUNDS:
+    {
+        RECT *rect = pv_attribute;
+        RECT window_rect;
+        DWORD style;
+        UINT dpi;
+        int button_count = 1;
+        int button_width, button_height;
+
+        if (!rect)
+            return E_INVALIDARG;
+        if (size < sizeof(*rect))
+            return E_NOT_SUFFICIENT_BUFFER;
+        if (GetWindowLongW(hwnd, GWL_STYLE) & WS_CHILD)
+            return E_HANDLE;
+        if (!GetWindowRect(hwnd, &window_rect))
+            return HRESULT_FROM_WIN32(GetLastError());
+
+        style = GetWindowLongW(hwnd, GWL_STYLE);
+        if (style & WS_MINIMIZEBOX) ++button_count;
+        if (style & WS_MAXIMIZEBOX) ++button_count;
+        dpi = GetDpiForWindow(hwnd);
+        button_width = MulDiv(46, dpi, USER_DEFAULT_SCREEN_DPI);
+        button_height = MulDiv(32, dpi, USER_DEFAULT_SCREEN_DPI);
+        rect->right = window_rect.right - window_rect.left;
+        rect->left = max(0, rect->right - button_count * button_width);
+        rect->top = 0;
+        rect->bottom = button_height;
+        hr = S_OK;
+        break;
+    }
     case DWMWA_EXTENDED_FRAME_BOUNDS:
     {
         RECT *rect = (RECT *)pv_attribute;
