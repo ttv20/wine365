@@ -1343,7 +1343,9 @@ HKL WINAPI NtUserActivateKeyboardLayout( HKL layout, UINT flags )
         return 0;
     }
 
-    if (LOWORD(layout) != MAKELANGID(LANG_INVARIANT, SUBLANG_DEFAULT) &&
+    /* Host input methods use E001 with the active keyboard language in the low word. */
+    if (HIWORD(layout) != 0xe001 &&
+        LOWORD(layout) != MAKELANGID(LANG_INVARIANT, SUBLANG_DEFAULT) &&
         (NtQueryDefaultLocale( TRUE, &locale ) || LOWORD(layout) != locale))
     {
         RtlSetLastWin32Error( ERROR_CALL_NOT_IMPLEMENTED );

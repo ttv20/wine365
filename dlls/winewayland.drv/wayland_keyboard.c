@@ -109,10 +109,14 @@ static struct list xkb_layouts = LIST_INIT(xkb_layouts);
 /* These are only used from the wayland event thread and don't need locking */
 static struct rxkb_context *rxkb_context;
 static HKL keyboard_hkl; /* the HKL matching the currently active xkb group */
+static LANGID keyboard_lang; /* the language matching the currently active xkb group */
 
 void activate_keyboard_hkl(HWND hwnd, BOOL ime)
 {
-    HKL hkl = ime && !is_ime_hkl(keyboard_hkl) ? get_ime_hkl(LOWORD(keyboard_hkl)) : keyboard_hkl;
+    HKL hkl = keyboard_hkl;
+
+    if (ime && !is_ime_hkl(hkl))
+        hkl = get_ime_hkl(keyboard_lang ? keyboard_lang : LOWORD(hkl));
     TRACE("Changing keyboard layout to %p\n", hkl);
     NtUserPostMessage(hwnd, WM_INPUTLANGCHANGEREQUEST, 0 /*FIXME*/, (LPARAM)hkl);
 }
@@ -626,7 +630,10 @@ static void set_current_xkb_group(xkb_layout_index_t xkb_group)
     LIST_FOR_EACH_ENTRY(layout, &xkb_layouts, struct layout, entry)
         if (layout->xkb_group == xkb_group) break;
     if (&layout->entry != &xkb_layouts)
+    {
         hkl = get_layout_hkl(layout, locale);
+        keyboard_lang = layout->lang;
+    }
     else
     {
         ERR("Failed to find Xkb Layout for group %d\n", xkb_group);
