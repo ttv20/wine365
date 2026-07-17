@@ -358,6 +358,86 @@ static void test_AddFile(void)
     ok(hres == S_OK, "Second call to AddFile failed: 0x%08lx\n", hres);
 }
 
+/* Test adding a ranged file and retrieving the ranges from the file object. */
+static void test_AddFileWithRanges(void)
+{
+    static const WCHAR remote[] = L"http://test.winehq.org/tests/hello.html";
+    BG_FILE_RANGE ranges[] = {{10, 5}, {0, 4}, {30, BG_LENGTH_TO_EOF}};
+    BG_FILE_RANGE overlapping[] = {{0, 5}, {4, 2}};
+    BG_FILE_RANGE invalid = {0, 0};
+    IEnumBackgroundCopyFiles *enum_files;
+    IBackgroundCopyFile2 *file2;
+    IBackgroundCopyFile *file;
+    IBackgroundCopyJob3 *job3;
+    BG_FILE_RANGE *ret_ranges;
+    BG_JOB_PROGRESS progress;
+    ULONG fetched;
+    DWORD count, i;
+    HRESULT hr;
+
+    DeleteFileW(test_localPathA);
+
+    hr = IBackgroundCopyJob_QueryInterface(test_job, &IID_IBackgroundCopyJob3, (void **)&job3);
+    ok(hr == S_OK, "got 0x%08lx\n", hr);
+    if (FAILED(hr)) return;
+
+    hr = IBackgroundCopyJob3_AddFileWithRanges(job3, remote, test_localPathA, 0, ranges);
+    ok(hr == E_INVALIDARG, "got 0x%08lx\n", hr);
+    hr = IBackgroundCopyJob3_AddFileWithRanges(job3, remote, test_localPathA, 1, &invalid);
+    ok(hr == BG_E_INVALID_RANGE, "got 0x%08lx\n", hr);
+    hr = IBackgroundCopyJob3_AddFileWithRanges(job3, remote, test_localPathA,
+                                                ARRAY_SIZE(overlapping), overlapping);
+    ok(hr == BG_E_OVERLAPPING_RANGES, "got 0x%08lx\n", hr);
+
+    hr = IBackgroundCopyJob3_AddFileWithRanges(job3, remote, test_localPathA,
+                                                ARRAY_SIZE(ranges), ranges);
+    ok(hr == S_OK, "got 0x%08lx\n", hr);
+
+    hr = IBackgroundCopyJob_GetProgress(test_job, &progress);
+    ok(hr == S_OK, "got 0x%08lx\n", hr);
+    ok(progress.FilesTotal == 1, "got %lu files\n", progress.FilesTotal);
+
+    hr = IBackgroundCopyJob_EnumFiles(test_job, &enum_files);
+    ok(hr == S_OK, "got 0x%08lx\n", hr);
+    if (SUCCEEDED(hr))
+    {
+        file = NULL;
+        fetched = 0;
+        hr = IEnumBackgroundCopyFiles_Next(enum_files, 1, &file, &fetched);
+        ok(hr == S_OK, "got 0x%08lx\n", hr);
+        ok(fetched == 1, "got %lu files\n", fetched);
+        if (file)
+        {
+            hr = IBackgroundCopyFile_QueryInterface(file, &IID_IBackgroundCopyFile2, (void **)&file2);
+            ok(hr == S_OK, "got 0x%08lx\n", hr);
+            if (SUCCEEDED(hr))
+            {
+                count = 0;
+                ret_ranges = NULL;
+                hr = IBackgroundCopyFile2_GetFileRanges(file2, &count, &ret_ranges);
+                ok(hr == S_OK, "got 0x%08lx\n", hr);
+                ok(count == ARRAY_SIZE(ranges), "got %lu ranges\n", count);
+                if (ret_ranges)
+                {
+                    for (i = 0; i < min(count, (DWORD)ARRAY_SIZE(ranges)); ++i)
+                    {
+                        ok(ret_ranges[i].InitialOffset == ranges[i].InitialOffset,
+                           "range %lu offset %s\n", i, wine_dbgstr_longlong(ret_ranges[i].InitialOffset));
+                        ok(ret_ranges[i].Length == ranges[i].Length,
+                           "range %lu length %s\n", i, wine_dbgstr_longlong(ret_ranges[i].Length));
+                    }
+                    CoTaskMemFree(ret_ranges);
+                }
+                IBackgroundCopyFile2_Release(file2);
+            }
+            IBackgroundCopyFile_Release(file);
+        }
+        IEnumBackgroundCopyFiles_Release(enum_files);
+    }
+
+    IBackgroundCopyJob3_Release(job3);
+}
+
 /* Test adding a set of files */
 static void test_AddFileSet(void)
 {
@@ -569,6 +649,78 @@ static void test_CompleteLocal(void)
     ok(DeleteFileW(test_remotePathB), "DeleteFile\n");
     DeleteFileW(test_localPathA);
     DeleteFileW(test_localPathB);
+}
+
+/* Test a complete ranged transfer for a local file. */
+static void test_CompleteLocalRanges(void)
+{
+    static const char source[] = "0123456789abcdefghijklmnopqrstuvwxyz";
+    static const char expected[] = "abcde0123uvwxyz";
+    static const BG_FILE_RANGE ranges[] = {{10, 5}, {0, 4}, {30, 6}};
+    static const int timeout_sec = 30;
+    IBackgroundCopyJob3 *job3;
+    BG_JOB_PROGRESS progress;
+    BG_JOB_STATE state;
+    char buffer[32];
+    DWORD size;
+    HANDLE file;
+    HRESULT hr;
+    int i;
+
+    DeleteFileW(test_localPathA);
+    makeFile(test_remotePathA, source);
+
+    hr = IBackgroundCopyJob_QueryInterface(test_job, &IID_IBackgroundCopyJob3, (void **)&job3);
+    ok(hr == S_OK, "got 0x%08lx\n", hr);
+    if (FAILED(hr)) return;
+
+    hr = IBackgroundCopyJob3_AddFileWithRanges(job3, test_remotePathA, test_localPathA,
+                                                ARRAY_SIZE(ranges), (BG_FILE_RANGE *)ranges);
+    ok(hr == S_OK, "got 0x%08lx\n", hr);
+    IBackgroundCopyJob3_Release(job3);
+
+    hr = IBackgroundCopyJob_GetProgress(test_job, &progress);
+    ok(hr == S_OK, "got 0x%08lx\n", hr);
+    ok(progress.BytesTotal == sizeof(expected) - 1, "got %s bytes\n",
+       wine_dbgstr_longlong(progress.BytesTotal));
+    ok(progress.FilesTotal == 1, "got %lu files\n", progress.FilesTotal);
+
+    hr = IBackgroundCopyJob_Resume(test_job);
+    ok(hr == S_OK, "got 0x%08lx\n", hr);
+    for (i = 0; i < timeout_sec; ++i)
+    {
+        hr = IBackgroundCopyJob_GetState(test_job, &state);
+        ok(hr == S_OK, "got 0x%08lx\n", hr);
+        if (state == BG_JOB_STATE_TRANSFERRED || state == BG_JOB_STATE_ERROR) break;
+        Sleep(1000);
+    }
+    ok(i < timeout_sec, "BITS job timed out\n");
+    ok(state == BG_JOB_STATE_TRANSFERRED, "got state %u\n", state);
+
+    hr = IBackgroundCopyJob_GetProgress(test_job, &progress);
+    ok(hr == S_OK, "got 0x%08lx\n", hr);
+    ok(progress.BytesTotal == sizeof(expected) - 1, "got %s total bytes\n",
+       wine_dbgstr_longlong(progress.BytesTotal));
+    ok(progress.BytesTransferred == sizeof(expected) - 1, "got %s transferred bytes\n",
+       wine_dbgstr_longlong(progress.BytesTransferred));
+    ok(progress.FilesTransferred == 1, "got %lu transferred files\n", progress.FilesTransferred);
+
+    hr = IBackgroundCopyJob_Complete(test_job);
+    ok(hr == S_OK, "got 0x%08lx\n", hr);
+    file = CreateFileW(test_localPathA, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+    ok(file != INVALID_HANDLE_VALUE, "got error %lu\n", GetLastError());
+    if (file != INVALID_HANDLE_VALUE)
+    {
+        size = 0;
+        ok(ReadFile(file, buffer, sizeof(buffer), &size, NULL), "got error %lu\n", GetLastError());
+        ok(size == sizeof(expected) - 1, "got %lu bytes\n", size);
+        ok(size <= sizeof(buffer) && !memcmp(buffer, expected, min(size, (DWORD)sizeof(expected) - 1)),
+           "unexpected contents\n");
+        CloseHandle(file);
+    }
+
+    ok(DeleteFileW(test_remotePathA), "got error %lu\n", GetLastError());
+    ok(DeleteFileW(test_localPathA), "got error %lu\n", GetLastError());
 }
 
 /* Test a complete transfer for local files */
@@ -866,9 +1018,11 @@ START_TEST(job)
     };
     static const test_t tests_bits20[] = {
         test_AddFile,
+        test_AddFileWithRanges,
         test_AddFileSet,
         test_EnumFiles,
         test_CompleteLocal,
+        test_CompleteLocalRanges,
         test_CompleteLocalURL,
         test_Cancel, /* must be last */
         0

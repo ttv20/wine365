@@ -78,6 +78,8 @@ typedef struct
     WCHAR tempFileName[MAX_PATH];
     struct list entryFromJob;
     BackgroundCopyJobImpl *owner;
+    BG_FILE_RANGE *ranges;
+    DWORD range_count;
     DWORD read_size;
 } BackgroundCopyFileImpl;
 

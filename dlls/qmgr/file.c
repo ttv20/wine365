@@ -84,6 +84,7 @@ static ULONG WINAPI BackgroundCopyFile_Release(
         IBackgroundCopyJob4_Release(&file->owner->IBackgroundCopyJob4_iface);
         free(file->info.LocalName);
         free(file->info.RemoteName);
+        free(file->ranges);
         free(file);
     }
 
@@ -134,8 +135,21 @@ static HRESULT WINAPI BackgroundCopyFile_GetFileRanges(
     BG_FILE_RANGE **Ranges)
 {
     BackgroundCopyFileImpl *file = impl_from_IBackgroundCopyFile2(iface);
-    FIXME("(%p)->(%p %p)\n", file, RangeCount, Ranges);
-    return E_NOTIMPL;
+    BG_FILE_RANGE *ranges = NULL;
+
+    TRACE("(%p)->(%p %p)\n", file, RangeCount, Ranges);
+
+    if (!RangeCount || !Ranges) return E_INVALIDARG;
+
+    if (file->range_count)
+    {
+        if (!(ranges = CoTaskMemAlloc(file->range_count * sizeof(*ranges)))) return E_OUTOFMEMORY;
+        memcpy(ranges, file->ranges, file->range_count * sizeof(*ranges));
+    }
+
+    *RangeCount = file->range_count;
+    *Ranges = ranges;
+    return S_OK;
 }
 
 static HRESULT WINAPI BackgroundCopyFile_SetRemoteName(
@@ -200,12 +214,14 @@ static HRESULT hresult_from_http_response(DWORD code)
 {
     switch (code)
     {
-    case 200: return S_OK;
+    case 200:
+    case 206: return S_OK;
     case 400: return BG_E_HTTP_ERROR_400;
     case 401: return BG_E_HTTP_ERROR_401;
     case 404: return BG_E_HTTP_ERROR_404;
     case 407: return BG_E_HTTP_ERROR_407;
     case 414: return BG_E_HTTP_ERROR_414;
+    case 416: return BG_E_INVALID_RANGE;
     case 501: return BG_E_HTTP_ERROR_501;
     case 503: return BG_E_HTTP_ERROR_503;
     case 504: return BG_E_HTTP_ERROR_504;
@@ -261,7 +277,8 @@ static void CALLBACK progress_callback_http(HINTERNET handle, DWORD_PTR context,
             }
         }
         size = sizeof(len);
-        if (WinHttpQueryHeaders(handle, WINHTTP_QUERY_CONTENT_LENGTH|WINHTTP_QUERY_FLAG_NUMBER,
+        if (!file->range_count &&
+            WinHttpQueryHeaders(handle, WINHTTP_QUERY_CONTENT_LENGTH|WINHTTP_QUERY_FLAG_NUMBER,
                                 NULL, &len, &size, NULL))
         {
             file->fileProgress.BytesTotal = len;
@@ -359,62 +376,167 @@ static BOOL set_request_credentials(HINTERNET req, BackgroundCopyJobImpl *job)
     return TRUE;
 }
 
-static BOOL transfer_file_http(BackgroundCopyFileImpl *file, URL_COMPONENTSW *uc,
-                               const WCHAR *tmpfile)
+static void set_file_error(BackgroundCopyFileImpl *file, HRESULT hr, BG_ERROR_CONTEXT context)
 {
     BackgroundCopyJobImpl *job = file->owner;
-    HANDLE handle;
-    HINTERNET ses, con = NULL, req = NULL;
-    DWORD flags = (uc->nScheme == INTERNET_SCHEME_HTTPS) ? WINHTTP_FLAG_SECURE : 0;
+
+    EnterCriticalSection(&job->cs);
+    job->error.code = hr;
+    job->error.context = context;
+    if (job->error.file) IBackgroundCopyFile2_Release(job->error.file);
+    job->error.file = &file->IBackgroundCopyFile2_iface;
+    IBackgroundCopyFile2_AddRef(job->error.file);
+    LeaveCriticalSection(&job->cs);
+}
+
+static BOOL transfer_http_request(BackgroundCopyFileImpl *file, HINTERNET con, DWORD flags,
+                                  const WCHAR *path, const BG_FILE_RANGE *range, HANDLE output,
+                                  UINT64 *remote_size)
+{
+    BackgroundCopyJobImpl *job = file->owner;
+    HINTERNET req = NULL;
+    WCHAR range_header[96], content_range[128];
+    UINT64 expected = BG_SIZE_UNKNOWN, received = 0;
+    DWORD status, size, written;
+    UINT64 start, end, total;
     char buf[4096];
     BOOL ret = FALSE;
-    DWORD written;
 
-    transitionJobState(job, BG_JOB_STATE_QUEUED, BG_JOB_STATE_CONNECTING);
-
-    if (!(ses = WinHttpOpen(NULL, 0, NULL, NULL, WINHTTP_FLAG_ASYNC))) return FALSE;
-    WinHttpSetStatusCallback(ses, progress_callback_http, WINHTTP_CALLBACK_FLAG_ALL_COMPLETIONS, 0);
-    if (!WinHttpSetOption(ses, WINHTTP_OPTION_CONTEXT_VALUE, &file, sizeof(file))) goto done;
-
-    if (!(con = WinHttpConnect(ses, uc->lpszHostName, uc->nPort, 0))) goto done;
-    if (!(req = WinHttpOpenRequest(con, NULL, uc->lpszUrlPath, NULL, NULL, NULL, flags))) goto done;
+    if (!(req = WinHttpOpenRequest(con, NULL, path, NULL, NULL, NULL, flags))) goto done;
     if (!set_request_credentials(req, job)) goto done;
 
-    if (!(WinHttpSendRequest(req, job->http_options.headers, ~0u, NULL, 0, 0, (DWORD_PTR)file))) goto done;
+    if (range)
+    {
+        if (range->Length == BG_LENGTH_TO_EOF)
+            swprintf(range_header, ARRAY_SIZE(range_header), L"Range: bytes=%I64u-\r\n", range->InitialOffset);
+        else
+            swprintf(range_header, ARRAY_SIZE(range_header), L"Range: bytes=%I64u-%I64u\r\n",
+                     range->InitialOffset, range->InitialOffset + range->Length - 1);
+        if (!WinHttpAddRequestHeaders(req, range_header, ~0u,
+                                      WINHTTP_ADDREQ_FLAG_ADD | WINHTTP_ADDREQ_FLAG_REPLACE))
+            goto done;
+    }
+
+    if (!WinHttpSendRequest(req, job->http_options.headers, ~0u, NULL, 0, 0, (DWORD_PTR)file)) goto done;
     if (wait_for_completion(job) || FAILED(job->error.code)) goto done;
 
-    if (!(WinHttpReceiveResponse(req, NULL))) goto done;
+    if (!WinHttpReceiveResponse(req, NULL)) goto done;
     if (wait_for_completion(job) || FAILED(job->error.code)) goto done;
+
+    size = sizeof(status);
+    if (!WinHttpQueryHeaders(req, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+                             NULL, &status, &size, NULL))
+        goto done;
+
+    if (range)
+    {
+        if (status != 206)
+        {
+            set_file_error(file, status == 200 ? BG_E_INSUFFICIENT_RANGE_SUPPORT :
+                           hresult_from_http_response(status), BG_ERROR_CONTEXT_REMOTE_FILE);
+            goto done;
+        }
+
+        size = sizeof(content_range);
+        if (!WinHttpQueryHeaders(req, WINHTTP_QUERY_CONTENT_RANGE, NULL, content_range, &size, NULL) ||
+            swscanf(content_range, L"bytes %I64u-%I64u/%I64u", &start, &end, &total) != 3 ||
+            end < start || start != range->InitialOffset || total <= end)
+        {
+            set_file_error(file, BG_E_INSUFFICIENT_RANGE_SUPPORT, BG_ERROR_CONTEXT_REMOTE_FILE);
+            goto done;
+        }
+
+        expected = end - start + 1;
+        if ((range->Length != BG_LENGTH_TO_EOF && expected != range->Length) ||
+            (*remote_size != BG_SIZE_UNKNOWN && *remote_size != total))
+        {
+            set_file_error(file, BG_E_INVALID_RANGE, BG_ERROR_CONTEXT_REMOTE_FILE);
+            goto done;
+        }
+        *remote_size = total;
+    }
+    else if (status != 200)
+    {
+        set_file_error(file, hresult_from_http_response(status), BG_ERROR_CONTEXT_REMOTE_FILE);
+        goto done;
+    }
 
     transitionJobState(job, BG_JOB_STATE_CONNECTING, BG_JOB_STATE_TRANSFERRING);
-
-    handle = CreateFileW(tmpfile, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
-    if (handle == INVALID_HANDLE_VALUE) goto done;
 
     for (;;)
     {
         file->read_size = 0;
-        if (!(ret = WinHttpReadData(req, buf, sizeof(buf), NULL))) break;
-        if (wait_for_completion(job) || FAILED(job->error.code))
-        {
-            ret = FALSE;
-            break;
-        }
+        if (!WinHttpReadData(req, buf, sizeof(buf), NULL)) goto done;
+        if (wait_for_completion(job) || FAILED(job->error.code)) goto done;
         if (!file->read_size) break;
-        if (!(ret = WriteFile(handle, buf, file->read_size, &written, NULL))) break;
+        if (!WriteFile(output, buf, file->read_size, &written, NULL) || written != file->read_size) goto done;
 
+        received += file->read_size;
         EnterCriticalSection(&job->cs);
         file->fileProgress.BytesTransferred += file->read_size;
         job->jobProgress.BytesTransferred += file->read_size;
         LeaveCriticalSection(&job->cs);
     }
 
-    CloseHandle(handle);
+    if (expected != BG_SIZE_UNKNOWN && received != expected)
+    {
+        set_file_error(file, BG_E_INSUFFICIENT_RANGE_SUPPORT, BG_ERROR_CONTEXT_REMOTE_FILE);
+        goto done;
+    }
+    ret = TRUE;
 
 done:
-    WinHttpCloseHandle(req);
-    WinHttpCloseHandle(con);
-    WinHttpCloseHandle(ses);
+    if (!ret && SUCCEEDED(job->error.code))
+    {
+        DWORD error = GetLastError();
+        set_file_error(file, HRESULT_FROM_WIN32(error ? error : ERROR_GEN_FAILURE),
+                       BG_ERROR_CONTEXT_GENERAL_TRANSPORT);
+    }
+    if (req) WinHttpCloseHandle(req);
+    return ret;
+}
+
+static BOOL transfer_file_http(BackgroundCopyFileImpl *file, URL_COMPONENTSW *uc,
+                               const WCHAR *tmpfile)
+{
+    BackgroundCopyJobImpl *job = file->owner;
+    HINTERNET ses = NULL, con = NULL;
+    DWORD flags = (uc->nScheme == INTERNET_SCHEME_HTTPS) ? WINHTTP_FLAG_SECURE : 0;
+    UINT64 remote_size = BG_SIZE_UNKNOWN;
+    HANDLE output = INVALID_HANDLE_VALUE;
+    BOOL ret = FALSE;
+    DWORD i;
+
+    transitionJobState(job, BG_JOB_STATE_QUEUED, BG_JOB_STATE_CONNECTING);
+
+    if (!(ses = WinHttpOpen(NULL, 0, NULL, NULL, WINHTTP_FLAG_ASYNC))) goto done;
+    WinHttpSetStatusCallback(ses, progress_callback_http, WINHTTP_CALLBACK_FLAG_ALL_COMPLETIONS, 0);
+    if (!WinHttpSetOption(ses, WINHTTP_OPTION_CONTEXT_VALUE, &file, sizeof(file))) goto done;
+    if (!(con = WinHttpConnect(ses, uc->lpszHostName, uc->nPort, 0))) goto done;
+
+    output = CreateFileW(tmpfile, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (output == INVALID_HANDLE_VALUE) goto done;
+
+    if (file->range_count)
+    {
+        for (i = 0; i < file->range_count; ++i)
+            if (!transfer_http_request(file, con, flags, uc->lpszUrlPath, &file->ranges[i],
+                                       output, &remote_size))
+                goto done;
+
+        EnterCriticalSection(&job->cs);
+        file->fileProgress.BytesTotal = file->fileProgress.BytesTransferred;
+        LeaveCriticalSection(&job->cs);
+    }
+    else if (!transfer_http_request(file, con, flags, uc->lpszUrlPath, NULL, output, &remote_size))
+        goto done;
+
+    ret = TRUE;
+
+done:
+    if (output != INVALID_HANDLE_VALUE) CloseHandle(output);
+    if (con) WinHttpCloseHandle(con);
+    if (ses) WinHttpCloseHandle(ses);
     if (!ret && !transitionJobState(job, BG_JOB_STATE_CONNECTING, BG_JOB_STATE_ERROR))
         transitionJobState(job, BG_JOB_STATE_TRANSFERRING, BG_JOB_STATE_ERROR);
 
@@ -448,8 +570,12 @@ static DWORD CALLBACK progress_callback_local(LARGE_INTEGER totalSize, LARGE_INT
 static BOOL transfer_file_local(BackgroundCopyFileImpl *file, const WCHAR *tmpname)
 {
     BackgroundCopyJobImpl *job = file->owner;
+    HANDLE source = INVALID_HANDLE_VALUE, output = INVALID_HANDLE_VALUE;
     const WCHAR *ptr;
-    BOOL ret;
+    LARGE_INTEGER source_size, offset;
+    UINT64 bytes_total = 0;
+    BOOL ret = FALSE;
+    DWORD i;
 
     transitionJobState(job, BG_JOB_STATE_QUEUED, BG_JOB_STATE_TRANSFERRING);
 
@@ -458,9 +584,73 @@ static BOOL transfer_file_local(BackgroundCopyFileImpl *file, const WCHAR *tmpna
     else
         ptr = file->info.RemoteName;
 
-    if (!(ret = CopyFileExW(ptr, tmpname, progress_callback_local, file, NULL, 0)))
+    if (!file->range_count)
     {
-        WARN("Local file copy failed: error %lu\n", GetLastError());
+        ret = CopyFileExW(ptr, tmpname, progress_callback_local, file, NULL, 0);
+        if (!ret) WARN("Local file copy failed: error %lu\n", GetLastError());
+        goto done;
+    }
+
+    source = CreateFileW(ptr, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (source == INVALID_HANDLE_VALUE || !GetFileSizeEx(source, &source_size)) goto done;
+    output = CreateFileW(tmpname, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (output == INVALID_HANDLE_VALUE) goto done;
+
+    for (i = 0; i < file->range_count; ++i)
+    {
+        UINT64 remaining;
+
+        if (file->ranges[i].InitialOffset >= (UINT64)source_size.QuadPart)
+        {
+            set_file_error(file, BG_E_INVALID_RANGE, BG_ERROR_CONTEXT_LOCAL_FILE);
+            goto done;
+        }
+
+        remaining = file->ranges[i].Length == BG_LENGTH_TO_EOF ?
+                    (UINT64)source_size.QuadPart - file->ranges[i].InitialOffset : file->ranges[i].Length;
+        if (remaining > (UINT64)source_size.QuadPart - file->ranges[i].InitialOffset)
+        {
+            set_file_error(file, BG_E_INVALID_RANGE, BG_ERROR_CONTEXT_LOCAL_FILE);
+            goto done;
+        }
+
+        offset.QuadPart = file->ranges[i].InitialOffset;
+        if (!SetFilePointerEx(source, offset, NULL, FILE_BEGIN)) goto done;
+
+        while (remaining)
+        {
+            char buf[4096];
+            DWORD requested = remaining > sizeof(buf) ? sizeof(buf) : remaining, read, written;
+
+            if (!ReadFile(source, buf, requested, &read, NULL) || !read ||
+                !WriteFile(output, buf, read, &written, NULL) || written != read)
+                goto done;
+
+            remaining -= read;
+            bytes_total += read;
+            EnterCriticalSection(&job->cs);
+            file->fileProgress.BytesTransferred += read;
+            job->jobProgress.BytesTransferred += read;
+            LeaveCriticalSection(&job->cs);
+        }
+    }
+
+    EnterCriticalSection(&job->cs);
+    file->fileProgress.BytesTotal = bytes_total;
+    LeaveCriticalSection(&job->cs);
+    ret = TRUE;
+
+done:
+    if (source != INVALID_HANDLE_VALUE) CloseHandle(source);
+    if (output != INVALID_HANDLE_VALUE) CloseHandle(output);
+    if (!ret)
+    {
+        if (SUCCEEDED(job->error.code))
+        {
+            DWORD error = GetLastError();
+            set_file_error(file, HRESULT_FROM_WIN32(error ? error : ERROR_GEN_FAILURE),
+                           BG_ERROR_CONTEXT_LOCAL_FILE);
+        }
         transitionJobState(job, BG_JOB_STATE_TRANSFERRING, BG_JOB_STATE_ERROR);
     }
 
@@ -492,7 +682,7 @@ BOOL processFile(BackgroundCopyFileImpl *file, BackgroundCopyJobImpl *job)
     }
 
     EnterCriticalSection(&job->cs);
-    file->fileProgress.BytesTotal = BG_SIZE_UNKNOWN;
+    if (!file->range_count) file->fileProgress.BytesTotal = BG_SIZE_UNKNOWN;
     file->fileProgress.BytesTransferred = 0;
     file->fileProgress.Completed = FALSE;
     LeaveCriticalSection(&job->cs);
