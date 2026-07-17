@@ -4163,11 +4163,14 @@ static GpStatus SOFTWARE_GdipDrawPath(GpGraphics *graphics, GpPen *pen, GpPath *
     GpPath *wide_path;
     GpMatrix *transform=NULL;
     REAL flatness=1.0;
+    BOOL antialias = graphics->smoothing != SmoothingModeDefault
+            && graphics->smoothing != SmoothingModeNone
+            && graphics->smoothing != SmoothingModeHighSpeed;
 
-    /* Check if the final pen thickness in pixels is too thin. */
+    /* Widen antialiased thin paths too, so their outer edges receive coverage. */
     if (pen->unit == UnitPixel)
     {
-        if (pen->width < 1.415)
+        if (!antialias && pen->width < 1.415)
             return SOFTWARE_GdipDrawThinPath(graphics, pen, path);
     }
     else
@@ -4183,7 +4186,8 @@ static GpStatus SOFTWARE_GdipDrawPath(GpGraphics *graphics, GpPen *pen, GpPath *
         if (stat != Ok)
             return stat;
 
-        if (((points[1].X-points[0].X)*(points[1].X-points[0].X) +
+        if (!antialias &&
+            ((points[1].X-points[0].X)*(points[1].X-points[0].X) +
              (points[1].Y-points[0].Y)*(points[1].Y-points[0].Y) < 2.0001) &&
             ((points[2].X-points[0].X)*(points[2].X-points[0].X) +
              (points[2].Y-points[0].Y)*(points[2].Y-points[0].Y) < 2.0001))
@@ -4261,7 +4265,10 @@ GpStatus WINGDIPAPI GdipDrawPath(GpGraphics *graphics, GpPen *pen, GpPath *path)
 
     if (is_metafile_graphics(graphics))
         retval = METAFILE_DrawPath((GpMetafile*)graphics->image, pen, path);
-    else if (!has_gdi_dc(graphics) || graphics->alpha_hdc || !brush_can_fill_path(pen->brush, FALSE))
+    else if (!has_gdi_dc(graphics) || graphics->alpha_hdc || !brush_can_fill_path(pen->brush, FALSE)
+            || (graphics->smoothing != SmoothingModeDefault
+            && graphics->smoothing != SmoothingModeNone
+            && graphics->smoothing != SmoothingModeHighSpeed))
         retval = SOFTWARE_GdipDrawPath(graphics, pen, path);
     else
         retval = GDI32_GdipDrawPath(graphics, pen, path);
@@ -4573,6 +4580,8 @@ static void bitmap_scanline_span_fill(GpBitmap *dst_bitmap, const DWORD *src_row
     }
 }
 
+static GpStatus SOFTWARE_GdipFillPath_AA(GpGraphics *graphics, GpBrush *brush, GpPath *path);
+
 static GpStatus SOFTWARE_GdipFillPath(GpGraphics *graphics, GpBrush *brush, GpPath *path)
 {
     GpStatus stat;
@@ -4580,6 +4589,13 @@ static GpStatus SOFTWARE_GdipFillPath(GpGraphics *graphics, GpBrush *brush, GpPa
 
     if (!brush_can_fill_pixels(brush))
         return NotImplemented;
+
+    if (graphics->smoothing != SmoothingModeDefault
+            && graphics->smoothing != SmoothingModeNone
+            && graphics->smoothing != SmoothingModeHighSpeed
+            && (graphics->compmode != CompositingModeSourceCopy
+            || (graphics->image && graphics->image->type == ImageTypeBitmap)))
+        return SOFTWARE_GdipFillPath_AA(graphics, brush, path);
 
     /* FIXME: This could probably be done more efficiently without regions. */
 
@@ -5085,6 +5101,133 @@ static GpStatus SOFTWARE_GdipFillRegion(GpGraphics *graphics, GpBrush *brush,
     GdipDeleteRegion(device_region);
     gdi_transform_release(graphics);
 
+    return stat;
+}
+
+/* GDI regions have binary pixel coverage. Supersample the complete clipped path
+ * instead of individual triangles so antialiasing cannot expose tessellation seams. */
+static GpStatus SOFTWARE_GdipFillPath_AA(GpGraphics *graphics, GpBrush *brush, GpPath *path)
+{
+    enum { sample_scale = 8, sample_count = sample_scale * sample_scale };
+    GpRegion *region = NULL, *device_region = NULL, *sample_region = NULL;
+    GpMatrix *scale_matrix = NULL;
+    struct span_list spans = {0};
+    GpBitmap *dst_bitmap = (GpBitmap *)graphics->image;
+    DWORD *pixel_data = NULL;
+    BYTE *coverage = NULL;
+    GpRect bounds;
+    RECT sample_bounds;
+    size_t pixel_count, i;
+    BOOL transform_acquired = FALSE;
+    GpStatus stat;
+
+    stat = GdipCreateRegionPath(path, &region);
+    if (stat != Ok)
+        return stat;
+
+    stat = gdi_transform_acquire(graphics);
+    if (stat == Ok)
+    {
+        transform_acquired = TRUE;
+        stat = get_clipped_device_region(graphics, region, &device_region);
+    }
+    if (stat == Ok)
+        stat = GdipGetRegionBoundsI(device_region, graphics, &bounds);
+
+    if (stat == Ok && (!bounds.Width || !bounds.Height))
+        goto done;
+
+    if (stat == Ok && (bounds.Width < 0 || bounds.Height < 0
+            || (size_t)bounds.Width > SIZE_MAX / (size_t)bounds.Height))
+        stat = OutOfMemory;
+
+    pixel_count = stat == Ok ? (size_t)bounds.Width * bounds.Height : 0;
+    if (stat == Ok && (!(pixel_data = calloc(pixel_count, sizeof(*pixel_data)))
+            || !(coverage = calloc(pixel_count, sizeof(*coverage)))))
+        stat = OutOfMemory;
+
+    if (stat == Ok)
+        stat = brush_fill_pixels(graphics, brush, pixel_data, &bounds, bounds.Width);
+    if (stat == Ok)
+        stat = GdipCloneRegion(device_region, &sample_region);
+    if (stat == Ok)
+        stat = GdipCreateMatrix2(sample_scale, 0.0f, 0.0f, sample_scale, 0.0f, 0.0f, &scale_matrix);
+    if (stat == Ok)
+        stat = GdipTransformRegion(sample_region, scale_matrix);
+
+    if (stat == Ok)
+    {
+        sample_bounds.left = bounds.X * sample_scale;
+        sample_bounds.top = bounds.Y * sample_scale;
+        sample_bounds.right = (bounds.X + bounds.Width) * sample_scale;
+        sample_bounds.bottom = (bounds.Y + bounds.Height) * sample_scale;
+        stat = region_element_to_spans(&sample_region->node, &sample_bounds, &spans);
+    }
+
+    if (stat == Ok)
+    {
+        for (i = 0; i < spans.length; ++i)
+        {
+            const struct span *span = &spans.spans[i];
+            int sample_x, pixel_y = span->y / sample_scale;
+
+            if (pixel_y < bounds.Y || pixel_y >= bounds.Y + bounds.Height)
+                continue;
+
+            for (sample_x = span->x[0]; sample_x < span->x[1]; ++sample_x)
+            {
+                int pixel_x = sample_x / sample_scale;
+                size_t offset;
+
+                if (pixel_x < bounds.X || pixel_x >= bounds.X + bounds.Width)
+                    continue;
+                offset = (size_t)(pixel_y - bounds.Y) * bounds.Width + pixel_x - bounds.X;
+                if (coverage[offset] < sample_count)
+                    ++coverage[offset];
+            }
+        }
+
+        for (i = 0; i < pixel_count; ++i)
+        {
+            BYTE alpha = (((pixel_data[i] >> 24) & 0xff) * coverage[i] + sample_count / 2) / sample_count;
+            pixel_data[i] = (pixel_data[i] & 0x00ffffff) | (alpha << 24);
+        }
+
+        if (graphics->image && graphics->image->type == ImageTypeBitmap)
+        {
+            for (i = 0; i < pixel_count; ++i)
+            {
+                ARGB dst_color;
+                int x, y;
+
+                if (!(pixel_data[i] & 0xff000000))
+                    continue;
+
+                x = bounds.X + i % bounds.Width;
+                y = bounds.Y + i / bounds.Width;
+                if (graphics->compmode == CompositingModeSourceCopy)
+                    GdipBitmapSetPixel(dst_bitmap, x, y, pixel_data[i]);
+                else
+                {
+                    GdipBitmapGetPixel(dst_bitmap, x, y, &dst_color);
+                    GdipBitmapSetPixel(dst_bitmap, x, y, color_over(dst_color, pixel_data[i]));
+                }
+            }
+        }
+        else
+            stat = alpha_blend_hdc_pixels(graphics, bounds.X, bounds.Y, (BYTE *)pixel_data,
+                    bounds.Width, bounds.Height, bounds.Width * 4, PixelFormat32bppARGB);
+    }
+
+done:
+    free(spans.spans);
+    free(coverage);
+    free(pixel_data);
+    if (scale_matrix) GdipDeleteMatrix(scale_matrix);
+    if (sample_region) GdipDeleteRegion(sample_region);
+    if (device_region) GdipDeleteRegion(device_region);
+    GdipDeleteRegion(region);
+    if (transform_acquired) gdi_transform_release(graphics);
     return stat;
 }
 

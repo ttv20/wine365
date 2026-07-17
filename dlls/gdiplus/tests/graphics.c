@@ -1645,6 +1645,60 @@ static void test_GdipFillPath(void)
     ReleaseDC(hwnd, hdc);
 }
 
+static int render_smoothed_path(SmoothingMode mode)
+{
+    GpPointF points[] = {{8.25f, 8.25f}, {55.75f, 25.5f}, {10.5f, 55.75f}};
+    BITMAPINFO bmi = {{sizeof(BITMAPINFOHEADER), 64, -64, 1, 32, BI_RGB}};
+    GpSolidFill *brush = NULL;
+    GpGraphics *graphics = NULL;
+    GpPath *path = NULL;
+    HBITMAP bitmap, old_bitmap;
+    BYTE *bits;
+    HDC hdc;
+    GpStatus status;
+    int i, middle = 0;
+
+    hdc = CreateCompatibleDC(NULL);
+    bitmap = CreateDIBSection(hdc, &bmi, DIB_RGB_COLORS, (void **)&bits, NULL, 0);
+    ok(!!bitmap, "Failed to create test bitmap.\n");
+    old_bitmap = SelectObject(hdc, bitmap);
+    memset(bits, 0xff, 64 * 64 * 4);
+
+    status = GdipCreateFromHDC(hdc, &graphics);
+    expect(Ok, status);
+    status = GdipSetSmoothingMode(graphics, mode);
+    expect(Ok, status);
+    status = GdipCreatePath(FillModeAlternate, &path);
+    expect(Ok, status);
+    status = GdipAddPathPolygon(path, points, ARRAY_SIZE(points));
+    expect(Ok, status);
+    status = GdipCreateSolidFill(0xff000000, &brush);
+    expect(Ok, status);
+    status = GdipFillPath(graphics, (GpBrush *)brush, path);
+    expect(Ok, status);
+
+    for (i = 0; i < 64 * 64; ++i)
+        if (bits[i * 4] && bits[i * 4] != 0xff)
+            ++middle;
+
+    GdipDeleteBrush((GpBrush *)brush);
+    GdipDeletePath(path);
+    GdipDeleteGraphics(graphics);
+    SelectObject(hdc, old_bitmap);
+    DeleteObject(bitmap);
+    DeleteDC(hdc);
+    return middle;
+}
+
+static void test_GdipFillPath_smoothing(void)
+{
+    int aliased_middle = render_smoothed_path(SmoothingModeNone);
+    int antialiased_middle = render_smoothed_path(SmoothingModeAntiAlias);
+
+    ok(!aliased_middle, "Aliased path has %d intermediate pixels.\n", aliased_middle);
+    ok(antialiased_middle > 0, "Antialiased path has no intermediate coverage pixels.\n");
+}
+
 static void test_Get_Release_DC(void)
 {
     GpStatus status;
@@ -7586,6 +7640,7 @@ START_TEST(graphics)
     test_GdipFillClosedCurve();
     test_GdipFillClosedCurveI();
     test_GdipFillPath();
+    test_GdipFillPath_smoothing();
     test_GdipDrawString();
     test_GdipGetNearestColor();
     test_GdipGetVisibleClipBounds();
