@@ -2398,14 +2398,14 @@ static void throttle_office_net_ui_yield(void)
     struct timespec current, delay;
     long milliseconds;
 
-    if (!(throttle = getenv( "WINE_NETUI_INPUT_THROTTLE" )) ||
-        !getenv( "WINE_NETUI_YIELD_ACTIVE" ))
+    if (!getenv( "WINE_NETUI_YIELD_ACTIVE" ))
     {
         rapid_yields = 0;
         active_since.tv_sec = active_since.tv_nsec = 0;
         previous.tv_sec = previous.tv_nsec = 0;
         return;
     }
+    throttle = getenv( "WINE_NETUI_INPUT_THROTTLE" );
 
     clock_gettime( CLOCK_MONOTONIC, &current );
     since_previous = (current.tv_sec - previous.tv_sec) * 1000000000ll
@@ -2434,7 +2434,10 @@ static void throttle_office_net_ui_yield(void)
         return;
     rapid_yields = 0;
 
-    milliseconds = strtol( throttle, NULL, 10 );
+    /* Office gallery windows activate this path automatically.  Keep the
+     * environment variable as an optional diagnostic override, not a runtime
+     * requirement. */
+    milliseconds = throttle ? strtol( throttle, NULL, 10 ) : 10;
     if (milliseconds < 1) milliseconds = 1;
     if (milliseconds > 20) milliseconds = 20;
     delay.tv_sec = 0;
@@ -2452,7 +2455,7 @@ NTSTATUS WINAPI NtYieldExecution(void)
     /* The visible Office gallery loop expects the native no-yield status.
      * Avoid two getrusage() calls and sched_yield() for every thumbnail-loop
      * iteration when this UI-thread-only path is active. */
-    if (getenv( "WINE_NETUI_INPUT_THROTTLE" ) && getenv( "WINE_NETUI_YIELD_ACTIVE" ))
+    if (getenv( "WINE_NETUI_YIELD_ACTIVE" ))
     {
         throttle_office_net_ui_yield();
         return STATUS_NO_YIELD_PERFORMED;

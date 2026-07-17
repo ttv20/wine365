@@ -2046,9 +2046,7 @@ static void update_office_net_ui_yield_throttle( HWND hwnd, BOOL visible )
     RECT rect;
     BOOL gallery;
 
-    if (!getenv( "WINE_NETUI_INPUT_THROTTLE" ) ||
-        !is_office_net_ui_tool_window( hwnd ))
-        return;
+    if (!is_office_net_ui_tool_window( hwnd )) return;
 
     if (visible)
     {
