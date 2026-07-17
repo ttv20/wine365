@@ -1031,6 +1031,20 @@ static BOOL request_query_option( struct object_header *hdr, DWORD option, void 
     case WINHTTP_OPTION_PROXY_PASSWORD:
         return return_string_option( buffer, request->connect->session->proxy_password, buflen );
 
+    case WINHTTP_OPTION_AUTOLOGON_POLICY:
+        if (!validate_buffer( buffer, buflen, sizeof(DWORD) )) return FALSE;
+
+        *(DWORD *)buffer = request->hdr.logon_policy;
+        *buflen = sizeof(DWORD);
+        return TRUE;
+
+    case WINHTTP_OPTION_REDIRECT_POLICY:
+        if (!validate_buffer( buffer, buflen, sizeof(DWORD) )) return FALSE;
+
+        *(DWORD *)buffer = request->hdr.redirect_policy;
+        *buflen = sizeof(DWORD);
+        return TRUE;
+
     case WINHTTP_OPTION_MAX_HTTP_AUTOMATIC_REDIRECTS:
         if (!validate_buffer( buffer, buflen, sizeof(DWORD) )) return FALSE;
 

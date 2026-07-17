@@ -3321,6 +3321,11 @@ DWORD INET_SetOption(object_header_t *hdr, DWORD option, void *buf, DWORD size)
         if (!buf || size != sizeof(ULONG)) return ERROR_INVALID_PARAMETER;
         hdr->receive_timeout = *(ULONG *)buf;
         return ERROR_SUCCESS;
+    case INTERNET_OPTION_LISTEN_TIMEOUT:
+        if (!buf || size != sizeof(ULONG)) return ERROR_INVALID_PARAMETER;
+        /* Windows accepts this deprecated option even though it has no effect. */
+        TRACE("ignoring INTERNET_OPTION_LISTEN_TIMEOUT %lu\n", *(ULONG *)buf);
+        return ERROR_SUCCESS;
     case INTERNET_OPTION_DATA_SEND_TIMEOUT:
         if (!buf || size != sizeof(ULONG)) return ERROR_INVALID_PARAMETER;
         hdr->data_send_timeout = *(ULONG *)buf;
