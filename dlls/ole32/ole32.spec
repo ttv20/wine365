@@ -9,6 +9,7 @@
 @ stdcall CoAddRefServerProcess() combase.CoAddRefServerProcess
 @ stdcall CoAllowSetForegroundWindow(ptr ptr)
 @ stdcall CoBuildVersion()
+@ stdcall CoCancelCall(long long) combase.CoCancelCall
 @ stdcall CoCopyProxy(ptr ptr) combase.CoCopyProxy
 @ stdcall CoCreateFreeThreadedMarshaler(ptr ptr) combase.CoCreateFreeThreadedMarshaler
 @ stdcall CoCreateGuid(ptr) combase.CoCreateGuid

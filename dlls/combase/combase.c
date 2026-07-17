@@ -3521,6 +3521,25 @@ HRESULT WINAPI CoRegisterChannelHook(REFGUID guidExtension, IChannelHook *channe
 }
 
 /***********************************************************************
+ *           CoCancelCall    (combase.@)
+ */
+HRESULT WINAPI CoCancelCall(DWORD thread_id, ULONG timeout)
+{
+    RPC_STATUS status;
+    HANDLE thread;
+
+    TRACE("%lu, %lu\n", thread_id, timeout);
+
+    if (!thread_id) thread_id = GetCurrentThreadId();
+    if (!(thread = OpenThread(THREAD_QUERY_INFORMATION, FALSE, thread_id)))
+        return HRESULT_FROM_WIN32(GetLastError());
+
+    status = RpcCancelThreadEx(thread, timeout);
+    CloseHandle(thread);
+    return HRESULT_FROM_WIN32(status);
+}
+
+/***********************************************************************
  *           CoDisableCallCancellation    (combase.@)
  */
 HRESULT WINAPI CoDisableCallCancellation(void *reserved)

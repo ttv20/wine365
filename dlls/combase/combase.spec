@@ -75,7 +75,7 @@
 @ stub ClearCleanupFlag
 @ stdcall CoAddRefServerProcess()
 @ stub CoAllowUnmarshalerCLSID
-@ stub CoCancelCall
+@ stdcall CoCancelCall(long long)
 @ stdcall CoCopyProxy(ptr ptr)
 @ stdcall CoCreateErrorInfo(ptr) CreateErrorInfo
 @ stdcall CoCreateFreeThreadedMarshaler(ptr ptr)

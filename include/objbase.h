@@ -372,6 +372,7 @@ WINOLE32API HRESULT WINAPI CoUnmarshalHresult(LPSTREAM pstm, HRESULT* phresult);
 WINOLE32API HRESULT WINAPI CoUnmarshalInterface(LPSTREAM pStm, REFIID riid, LPVOID* ppv);
 WINOLE32API HRESULT WINAPI CoLockObjectExternal(LPUNKNOWN pUnk, BOOL fLock, BOOL fLastUnlockReleases);
 WINOLE32API BOOL WINAPI CoIsHandlerConnected(LPUNKNOWN pUnk);
+WINOLE32API HRESULT WINAPI CoCancelCall(DWORD thread_id, ULONG timeout);
 WINOLE32API HRESULT WINAPI CoDisableCallCancellation(void *reserved);
 WINOLE32API HRESULT WINAPI CoEnableCallCancellation(void *reserved);
 
