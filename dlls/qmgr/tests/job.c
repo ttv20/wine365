@@ -38,6 +38,8 @@ static IBackgroundCopyManager *test_manager;
 static IBackgroundCopyJob *test_job;
 static GUID test_jobId;
 static BG_JOB_TYPE test_type;
+static LONG clear_notify_on_transfer;
+static HRESULT clear_notify_result;
 
 typedef struct IBackgroundCopyCallback2Impl {
     IBackgroundCopyCallback2 IBackgroundCopyCallback2_iface;
@@ -114,6 +116,8 @@ static HRESULT WINAPI IBackgroundCopyCallback2Impl_JobModification(IBackgroundCo
 static HRESULT WINAPI IBackgroundCopyCallback2Impl_JobTransferred(IBackgroundCopyCallback2 *iface, IBackgroundCopyJob *pJob)
 {
     trace("IBackgroundCopyCallback2Impl_JobTransferred called (%p, %p)\n", iface, pJob);
+    if (InterlockedExchange(&clear_notify_on_transfer, FALSE))
+        clear_notify_result = IBackgroundCopyJob_SetNotifyInterface(pJob, NULL);
     return S_OK;
 }
 
@@ -723,6 +727,56 @@ static void test_CompleteLocalRanges(void)
     ok(DeleteFileW(test_localPathA), "got error %lu\n", GetLastError());
 }
 
+/* Releasing the callback proxy from an active callback must not deadlock its RPC interface teardown. */
+static void test_NotifyTeardownInCallback(void)
+{
+    static const char source[] = "callback teardown";
+    static const int timeout_sec = 30;
+    IBackgroundCopyCallback2 *callback;
+    BG_JOB_STATE state = BG_JOB_STATE_QUEUED;
+    HRESULT hr;
+    int i;
+
+    DeleteFileW(test_localPathA);
+    makeFile(test_remotePathA, source);
+    ok(create_background_copy_callback2(&callback), "failed to create callback\n");
+    if (!callback) return;
+
+    hr = IBackgroundCopyJob_SetNotifyInterface(test_job, (IUnknown *)callback);
+    ok(hr == S_OK, "got 0x%08lx\n", hr);
+    hr = IBackgroundCopyJob_SetNotifyFlags(test_job, BG_NOTIFY_JOB_TRANSFERRED);
+    ok(hr == S_OK, "got 0x%08lx\n", hr);
+    hr = IBackgroundCopyJob_AddFile(test_job, test_remotePathA, test_localPathA);
+    ok(hr == S_OK, "got 0x%08lx\n", hr);
+
+    clear_notify_result = E_UNEXPECTED;
+    InterlockedExchange(&clear_notify_on_transfer, TRUE);
+    hr = IBackgroundCopyJob_Resume(test_job);
+    ok(hr == S_OK, "got 0x%08lx\n", hr);
+
+    for (i = 0; i < timeout_sec; ++i)
+    {
+        hr = IBackgroundCopyJob_GetState(test_job, &state);
+        ok(hr == S_OK, "got 0x%08lx\n", hr);
+        if (state == BG_JOB_STATE_ERROR ||
+            (state == BG_JOB_STATE_TRANSFERRED &&
+             !InterlockedCompareExchange(&clear_notify_on_transfer, FALSE, FALSE)))
+            break;
+        Sleep(1000);
+    }
+    ok(i < timeout_sec, "callback teardown timed out\n");
+    ok(state == BG_JOB_STATE_TRANSFERRED, "got state %u\n", state);
+    ok(!InterlockedCompareExchange(&clear_notify_on_transfer, FALSE, FALSE),
+       "JobTransferred was not called\n");
+    ok(clear_notify_result == S_OK, "SetNotifyInterface returned 0x%08lx\n", clear_notify_result);
+
+    hr = IBackgroundCopyJob_Complete(test_job);
+    ok(hr == S_OK, "got 0x%08lx\n", hr);
+    IBackgroundCopyCallback2_Release(callback);
+    ok(DeleteFileW(test_remotePathA), "got error %lu\n", GetLastError());
+    ok(DeleteFileW(test_localPathA), "got error %lu\n", GetLastError());
+}
+
 /* Test a complete transfer for local files */
 static void test_CompleteLocalURL(void)
 {
@@ -1023,6 +1077,7 @@ START_TEST(job)
         test_EnumFiles,
         test_CompleteLocal,
         test_CompleteLocalRanges,
+        test_NotifyTeardownInCallback,
         test_CompleteLocalURL,
         test_Cancel, /* must be last */
         0
