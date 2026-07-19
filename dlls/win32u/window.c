@@ -1409,11 +1409,22 @@ static HWND set_window_owner( HWND hwnd, HWND owner )
     return ret;
 }
 
+static BOOL is_office_nui_dialog( HWND hwnd )
+{
+    static const WCHAR nui_dialogW[] = {'N','U','I','D','i','a','l','o','g',0};
+    WCHAR buffer[32];
+    UNICODE_STRING name = {.Buffer = buffer, .MaximumLength = sizeof(buffer)};
+
+    if (!NtUserGetClassName( hwnd, FALSE, &name )) return FALSE;
+    return !wcscmp( buffer, nui_dialogW );
+}
+
 /* Helper function for SetWindowLong(). */
 static LONG_PTR set_window_long_internal( HWND hwnd, INT offset, UINT size,
                                           LONG_PTR newval, BOOL ansi, BOOL internal )
 {
     BOOL ok, made_visible = FALSE, layered = FALSE, old_ansi = ansi;
+    BOOL office_nui_dialog;
     LONG_PTR retval = 0, oldval;
     STYLESTRUCT style;
     WND *win;
@@ -1425,6 +1436,8 @@ static LONG_PTR set_window_long_internal( HWND hwnd, INT offset, UINT size,
         RtlSetLastWin32Error( ERROR_INVALID_PARAMETER );
         return FALSE;
     }
+
+    office_nui_dialog = offset == GWL_STYLE && is_office_nui_dialog( hwnd );
 
     if (!(win = get_win_ptr( hwnd )))
     {
@@ -1457,6 +1470,13 @@ static LONG_PTR set_window_long_internal( HWND hwnd, INT offset, UINT size,
         send_message( hwnd, WM_STYLECHANGING, GWL_STYLE, (LPARAM)&style );
         if (!(win = get_win_ptr( hwnd )) || win == WND_OTHER_PROCESS) return 0;
         newval = style.styleNew;
+        /* Office removes WS_SYSMENU from its composed NUI setup dialog while
+         * retaining a DWM close button on Windows. Keep the native Wine close
+         * button available when there is no compositor-drawn replacement. */
+        if (office_nui_dialog && (win->dwStyle & WS_SYSMENU) &&
+            (newval & (WS_POPUP | WS_CAPTION)) == (WS_POPUP | WS_CAPTION) &&
+            !(newval & (WS_SYSMENU | WS_THICKFRAME)))
+            newval |= WS_SYSMENU;
         /* WS_CLIPSIBLINGS can't be reset on top-level windows */
         if (win->parent == get_desktop_window()) newval |= WS_CLIPSIBLINGS;
         /* WS_MINIMIZE can't be reset */
