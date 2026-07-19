@@ -128,7 +128,9 @@ static void stub_manager_delete_ifstub(struct stub_manager *m, struct ifstub *if
     list_remove(&ifstub->entry);
 
     if (!m->disconnected)
-        rpc_unregister_interface(&ifstub->iid, TRUE);
+        /* This can run while returning from an RPC call on the interface being
+         * released, so waiting for active calls here would deadlock. */
+        rpc_unregister_interface(&ifstub->iid, FALSE);
 
     if (ifstub->stubbuffer) IRpcStubBuffer_Release(ifstub->stubbuffer);
     IUnknown_Release(ifstub->iface);

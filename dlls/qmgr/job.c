@@ -858,7 +858,68 @@ static HRESULT WINAPI BackgroundCopyJob_AddFileWithRanges(
     DWORD RangeCount,
     BG_FILE_RANGE Ranges[])
 {
-    FIXME("%p, %s, %s, %lu, %p: stub\n", iface, debugstr_w(RemoteUrl), debugstr_w(LocalName), RangeCount, Ranges);
+    BackgroundCopyJobImpl *job = impl_from_IBackgroundCopyJob4(iface);
+    BackgroundCopyFileImpl *file;
+    BG_FILE_RANGE *ranges;
+    UINT64 bytes_total = 0;
+    HRESULT hr;
+    DWORD i, j;
+
+    TRACE("%p, %s, %s, %lu, %p.\n", iface, debugstr_w(RemoteUrl), debugstr_w(LocalName), RangeCount, Ranges);
+
+    if (!RemoteUrl || !LocalName || !RangeCount || !Ranges) return E_INVALIDARG;
+    if (job->type != BG_JOB_TYPE_DOWNLOAD) return BG_E_INVALID_STATE;
+
+    for (i = 0; i < RangeCount; ++i)
+    {
+        UINT64 end;
+
+        if (!Ranges[i].Length) return BG_E_INVALID_RANGE;
+        if (Ranges[i].Length != BG_LENGTH_TO_EOF &&
+            Ranges[i].InitialOffset > ~(UINT64)0 - (Ranges[i].Length - 1))
+            return BG_E_INVALID_RANGE;
+
+        end = Ranges[i].Length == BG_LENGTH_TO_EOF ? ~(UINT64)0 :
+              Ranges[i].InitialOffset + Ranges[i].Length - 1;
+        for (j = 0; j < i; ++j)
+        {
+            UINT64 other_end = Ranges[j].Length == BG_LENGTH_TO_EOF ? ~(UINT64)0 :
+                               Ranges[j].InitialOffset + Ranges[j].Length - 1;
+
+            if (Ranges[i].InitialOffset <= other_end && Ranges[j].InitialOffset <= end)
+                return BG_E_OVERLAPPING_RANGES;
+        }
+
+        if (Ranges[i].Length == BG_LENGTH_TO_EOF ||
+            (bytes_total != BG_SIZE_UNKNOWN && bytes_total > ~(UINT64)0 - Ranges[i].Length))
+            bytes_total = BG_SIZE_UNKNOWN;
+        else if (bytes_total != BG_SIZE_UNKNOWN)
+            bytes_total += Ranges[i].Length;
+    }
+
+    if (!(ranges = malloc(RangeCount * sizeof(*ranges)))) return E_OUTOFMEMORY;
+    memcpy(ranges, Ranges, RangeCount * sizeof(*ranges));
+
+    hr = BackgroundCopyFileConstructor(job, RemoteUrl, LocalName, &file);
+    if (FAILED(hr))
+    {
+        free(ranges);
+        return hr;
+    }
+
+    file->ranges = ranges;
+    file->range_count = RangeCount;
+    file->fileProgress.BytesTotal = bytes_total;
+
+    EnterCriticalSection(&job->cs);
+    list_add_head(&job->files, &file->entryFromJob);
+    if (job->jobProgress.BytesTotal != BG_SIZE_UNKNOWN && bytes_total != BG_SIZE_UNKNOWN)
+        job->jobProgress.BytesTotal += bytes_total;
+    else
+        job->jobProgress.BytesTotal = BG_SIZE_UNKNOWN;
+    ++job->jobProgress.FilesTotal;
+    LeaveCriticalSection(&job->cs);
+
     return S_OK;
 }
 

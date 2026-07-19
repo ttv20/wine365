@@ -1322,12 +1322,27 @@ INT WINAPI NtUserToUnicodeEx( UINT virt, UINT scan, const BYTE *state,
     return len;
 }
 
+static void get_input_language_charset( LANGID lang, CHARSETINFO *charset )
+{
+    const NLS_LOCALE_DATA *data;
+
+    if (!(data = get_locale_data( lang )))
+        WARN( "Failed to find locale data for input language %04x\n", lang );
+    else if (PRIMARYLANGID( lang ) == LANG_HEBREW)
+        charset->ciCharset = HEBREW_CHARSET;
+    else if (data->ireadinglayout)
+        charset->ciCharset = ARABIC_CHARSET;
+    else
+        translate_charset_info( ULongToPtr(data->idefaultansicodepage), charset, TCI_SRCCODEPAGE );
+}
+
 /**********************************************************************
  *	     NtUserActivateKeyboardLayout    (win32u.@)
  */
 HKL WINAPI NtUserActivateKeyboardLayout( HKL layout, UINT flags )
 {
     struct user_thread_info *info = get_user_thread_info();
+    const KBDTABLES *kbd_tables;
     HKL old_layout;
     LCID locale;
     HWND focus;
@@ -1343,12 +1358,18 @@ HKL WINAPI NtUserActivateKeyboardLayout( HKL layout, UINT flags )
         return 0;
     }
 
-    if (LOWORD(layout) != MAKELANGID(LANG_INVARIANT, SUBLANG_DEFAULT) &&
+    /* Host input methods and driver-provided layouts may use a non-default input language. */
+    if (HIWORD(layout) != 0xe001 &&
+        LOWORD(layout) != MAKELANGID(LANG_INVARIANT, SUBLANG_DEFAULT) &&
         (NtQueryDefaultLocale( TRUE, &locale ) || LOWORD(layout) != locale))
     {
-        RtlSetLastWin32Error( ERROR_CALL_NOT_IMPLEMENTED );
-        FIXME_(keyboard)( "Changing user locale is not supported\n" );
-        return 0;
+        if (!(kbd_tables = user_driver->pKbdLayerDescriptor( layout )))
+        {
+            RtlSetLastWin32Error( ERROR_CALL_NOT_IMPLEMENTED );
+            FIXME_(keyboard)( "Changing user locale is not supported\n" );
+            return 0;
+        }
+        user_driver->pReleaseKbdTables( kbd_tables );
     }
 
     if (!user_driver->pActivateKeyboardLayout( layout, flags ))
@@ -1358,17 +1379,16 @@ HKL WINAPI NtUserActivateKeyboardLayout( HKL layout, UINT flags )
     if (old_layout != layout)
     {
         HWND ime_hwnd = get_default_ime_window( 0 );
-        const NLS_LOCALE_DATA *data;
         CHARSETINFO cs = {0};
 
         if (ime_hwnd) send_message( ime_hwnd, WM_IME_INTERNAL, IME_INTERNAL_HKL_DEACTIVATE, HandleToUlong(old_layout) );
 
-        if (HIWORD(layout) & 0x8000)
+        if (HIWORD(layout) == 0xe001)
+            get_input_language_charset( LOWORD(layout), &cs );
+        else if (HIWORD(layout) & 0x8000)
             FIXME( "Aliased keyboard layout not yet implemented\n" );
-        else if (!(data = get_locale_data( HIWORD(layout) )))
-            WARN( "Failed to find locale data for %04x\n", HIWORD(layout) );
         else
-            translate_charset_info( ULongToPtr(data->idefaultansicodepage), &cs, TCI_SRCCODEPAGE );
+            get_input_language_charset( HIWORD(layout), &cs );
 
         info->kbd_layout = layout;
         info->kbd_layout_id = 0;
