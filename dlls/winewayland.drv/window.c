@@ -147,45 +147,48 @@ void wayland_win_data_release(struct wayland_win_data *data)
     pthread_mutex_unlock(&win_data_mutex);
 }
 
-/* The caller holds win_data_mutex. Keep an owner-relative popup above all
- * GPU client surfaces attached to the owner, including surfaces stored on
- * child HWNDs rather than directly on the owner HWND. */
-void wayland_win_data_restack_clients_below(HWND toplevel, struct wl_surface *reference)
+/* The caller holds win_data_mutex. Keep all visible owner-relative popups
+ * above every GPU client surface attached to the owner. Rebuild the two
+ * groups relative to the owner surface instead of repeatedly positioning a
+ * client relative to different popups; the latter can move it back above an
+ * earlier popup when Office has separate border-effect windows. */
+void wayland_win_data_restack_owned_popups(HWND toplevel)
 {
-    struct wayland_win_data *data;
+    struct wayland_win_data *data, *toplevel_data;
+    struct wayland_surface *toplevel_surface, *popup;
+    struct wayland_client_surface *client;
+    BOOL popup_found = FALSE;
+    DWORD style;
 
+    if (!(toplevel_data = wayland_win_data_get_nolock(toplevel)) ||
+        !(toplevel_surface = toplevel_data->wayland_surface))
+        return;
+
+    /* First collect all popup surfaces immediately above the owner. */
     RB_FOR_EACH_ENTRY(data, &win_data_rb, struct wayland_win_data, entry)
     {
-        struct wayland_client_surface *client = data->client_surface;
-
-        if (!client || !client->wl_subsurface || client->toplevel != toplevel) continue;
-        wl_subsurface_place_below(client->wl_subsurface, reference);
-    }
-}
-
-/* The caller holds win_data_mutex. A GPU client surface may be presented or
- * reconfigured after an owner-relative popup has already been mapped. Keep
- * that late client update below every visible owned popup instead of letting
- * wl_subsurface_place_above() cover the popup. */
-void wayland_win_data_restack_client_below_popups(HWND toplevel,
-                                                  struct wayland_client_surface *client)
-{
-    struct wayland_win_data *data;
-
-    if (!client->wl_subsurface) return;
-
-    RB_FOR_EACH_ENTRY(data, &win_data_rb, struct wayland_win_data, entry)
-    {
-        struct wayland_surface *popup = data->wayland_surface;
-        DWORD style;
-
-        if (!popup || !popup->wl_subsurface || popup->owner_hwnd != toplevel
-                || !popup->window.visible)
+        popup = data->wayland_surface;
+        if (!popup || popup->role != WAYLAND_SURFACE_ROLE_SUBSURFACE ||
+            popup->owner_hwnd != toplevel || !popup->window.visible)
             continue;
         style = NtUserGetWindowLongW(data->hwnd, GWL_STYLE);
         if (!(style & WS_POPUP)) continue;
-        wl_subsurface_place_below(client->wl_subsurface, popup->wl_surface);
+        wl_subsurface_place_above(popup->wl_subsurface, toplevel_surface->wl_surface);
+        popup_found = TRUE;
     }
+    if (!popup_found) return;
+
+    /* Then put every owner GPU surface immediately above the owner. Since the
+     * popups were positioned first, these clients stay below the popup group. */
+    RB_FOR_EACH_ENTRY(data, &win_data_rb, struct wayland_win_data, entry)
+    {
+        client = data->client_surface;
+        if (!client || !client->wl_subsurface || client->toplevel != toplevel) continue;
+        wl_subsurface_place_above(client->wl_subsurface, toplevel_surface->wl_surface);
+    }
+
+    /* Subsurface stacking state is applied by committing the parent. */
+    wl_surface_commit(toplevel_surface->wl_surface);
 }
 
 static void wayland_win_data_get_config(struct wayland_win_data *data,
@@ -448,7 +451,7 @@ static BOOL is_window_managed(HWND hwnd, UINT swp_flags, BOOL fullscreen)
     if ((style & WS_POPUP) && NtUserGetWindowRelative(hwnd, GW_OWNER) &&
         !(style & WS_THICKFRAME) && !(ex_style & WS_EX_APPWINDOW))
     {
-        WARN( "WORD-WAYLAND-DIAG owned thin popup hwnd=%p keep owner-relative\n", hwnd );
+        TRACE("keeping owned popup hwnd=%p owner-relative\n", hwnd);
         return FALSE;
     }
     /* activated windows are managed */
@@ -902,8 +905,7 @@ void set_client_surface(HWND hwnd, struct wayland_client_surface *new_client)
 
     if (!(data = wayland_win_data_get(hwnd))) return;
 
-    WARN("WORD-WAYLAND-DIAG set hwnd %p old client %p new client %p.\n",
-            hwnd, data->client_surface, new_client);
+    TRACE("hwnd %p old client %p new client %p\n", hwnd, data->client_surface, new_client);
 
     if (new_client != data->client_surface)
     {
@@ -929,6 +931,12 @@ void set_client_surface(HWND hwnd, struct wayland_client_surface *new_client)
     {
         wayland_client_surface_attach(new_client, NULL, NULL);
     }
+    else if (visible)
+    {
+        /* Presenting an already attached GPU surface must not move it back
+         * above an owner-relative popup. */
+        wayland_win_data_restack_owned_popups(toplevel);
+    }
 
     wayland_win_data_release(data);
 }
@@ -947,6 +955,8 @@ BOOL set_window_surface_contents(HWND hwnd, struct wayland_shm_buffer *shm_buffe
         {
             wayland_surface_attach_shm(wayland_surface, shm_buffer, damage_region);
             wl_surface_commit(wayland_surface->wl_surface);
+            if (wayland_surface->role == WAYLAND_SURFACE_ROLE_SUBSURFACE)
+                wayland_win_data_restack_owned_popups(wayland_surface->owner_hwnd);
             committed = TRUE;
             if (data->defer_cursor_clip)
             {

@@ -393,9 +393,7 @@ struct wayland_win_data
 struct wayland_win_data *wayland_win_data_get(HWND hwnd);
 struct wayland_win_data *wayland_win_data_get_nolock(HWND hwnd);
 void wayland_win_data_release(struct wayland_win_data *data);
-void wayland_win_data_restack_clients_below(HWND toplevel, struct wl_surface *reference);
-void wayland_win_data_restack_client_below_popups(HWND toplevel,
-                                                  struct wayland_client_surface *client);
+void wayland_win_data_restack_owned_popups(HWND toplevel);
 
 struct wayland_client_surface *get_client_surface(HWND hwnd);
 void set_client_surface(HWND hwnd, struct wayland_client_surface *client);

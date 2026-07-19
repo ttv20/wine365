@@ -801,7 +801,7 @@ static void wayland_surface_reconfigure_subsurface(struct wayland_surface *surfa
             wl_subsurface_place_above(surface->wl_subsurface, owner_data->client_surface->wl_surface);
         else
             wl_subsurface_place_above(surface->wl_subsurface, owner_surface->wl_surface);
-        wayland_win_data_restack_clients_below(surface->owner_hwnd, surface->wl_surface);
+        wayland_win_data_restack_owned_popups(surface->owner_hwnd);
         wl_surface_commit(owner_surface->wl_surface);
 
         memset(&surface->processing, 0, sizeof(surface->processing));
@@ -1225,7 +1225,7 @@ static void wayland_client_surface_present(struct client_surface *client, HDC hd
     struct wayland_client_surface *surface = impl_from_client_surface(client);
     HWND hwnd = client->hwnd, toplevel = client->toplevel;
 
-    WARN("WORD-WAYLAND-DIAG present client %p hwnd %p tracked top %p attached top %p subsurface %p.\n",
+    TRACE("client %p hwnd %p tracked toplevel %p attached toplevel %p subsurface %p\n",
             surface, hwnd, toplevel, surface->toplevel, surface->wl_subsurface);
     ensure_window_surface_contents(toplevel);
     set_client_surface(hwnd, surface);
@@ -1304,7 +1304,7 @@ void wayland_client_surface_attach(struct wayland_client_surface *client, HWND t
     struct wayland_surface *surface;
     HWND hwnd = client->client.hwnd;
 
-    WARN("WORD-WAYLAND-DIAG attach client %p hwnd %p old top %p new top %p subsurface %p.\n",
+    TRACE("client %p hwnd %p old toplevel %p new toplevel %p subsurface %p\n",
             client, hwnd, client->toplevel, toplevel, client->wl_subsurface);
 
     if (!toplevel)
@@ -1345,7 +1345,7 @@ void wayland_client_surface_attach(struct wayland_client_surface *client, HWND t
     }
 
     wayland_surface_reconfigure_client(surface, client, client_rect);
-    wayland_win_data_restack_client_below_popups(toplevel, client);
+    wayland_win_data_restack_owned_popups(toplevel);
     /* Recommit the client surface in case destroying its previous subsurface
      * role unmapped an existing EGL buffer. Then apply the new subsurface
      * position atomically through the parent. */
