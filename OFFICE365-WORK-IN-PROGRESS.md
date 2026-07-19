@@ -31,6 +31,39 @@ and PowerPoint have not been investigated.
 No Office binary predicate is patched in the successful test.  Earlier binary
 patches were used only in disposable prefixes to prove causality.
 
+## Hebrew-only Office language and glyph fixes
+
+A clean Hebrew Click-to-Run installation contains localized `Office16/1037`
+resources but no `Office16/1033` resources.  It installed successfully, then Word
+exited normally with status 0 during startup.  Adding the official en-US language
+pack made Word remain open, which isolated the failure to Wine's preferred UI
+language handling rather than activation, ECS, or a crash.
+
+Wine previously returned its default `en-US` locale from all process/thread
+preferred-UI-language getters while both corresponding setters were success-only
+stubs.  `dlls/ntdll/locale.c` now stores canonical locale-name MULTI_SZ lists for
+the process and current thread, converts name and language-ID forms, and makes the
+getters honor the stored values.  Thread state falls back to process state and
+then to the existing default locale.  Per-thread storage is released during
+thread shutdown.  With this implementation, the same isolated Hebrew prefix
+continues running for more than 60 seconds after all 453 `Office16/1033` fallback
+files are removed again.
+
+A separate rendering defect produced square glyphs throughout the Hebrew UI,
+including Word's search box.  Targeted GDI tracing and a Win32 glyph probe showed
+that Office selects Tahoma and every tested Hebrew `GetGlyphIndicesW()` result was
+`0xffff`.  Wine's bundled metric-compatible Tahoma has no Hebrew outlines.
+`FontLink` loaded a Hebrew font but could not satisfy Office's glyph-index check.
+Wine also tried an installed original family before its configured
+`FontSubstitutes` replacement, making a Tahoma replacement ineffective for
+`DEFAULT_CHARSET`.
+
+`dlls/win32u/font.c` now gives an explicit font substitution priority over the
+original family.  `wine.inf` maps Tahoma to Liberation Sans, and the Wine 365
+runtime bundles the Liberation Sans faces in its private Wine font directory.
+The glyph probe then returns real glyph indices (`0507,0509,0514,0505,0519`), and
+the full Word UI, including the search placeholder, renders readable Hebrew.
+
 ## Causal startup findings
 
 ### Word error 31 and App-V virtual COM

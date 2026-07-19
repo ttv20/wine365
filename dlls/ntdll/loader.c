@@ -3993,6 +3993,8 @@ void WINAPI LdrShutdownThread(void)
     NtCurrentTeb()->FlsSlots = NULL;
     RtlFreeHeap( GetProcessHeap(), 0, NtCurrentTeb()->TlsExpansionSlots );
     NtCurrentTeb()->TlsExpansionSlots = NULL;
+    RtlFreeHeap( GetProcessHeap(), 0, NtCurrentTeb()->PreferredLanguages );
+    NtCurrentTeb()->PreferredLanguages = NULL;
     RtlReleasePebLock();
 
     RtlLeaveCriticalSection( &loader_section );

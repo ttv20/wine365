@@ -39,6 +39,8 @@ BYTE NlsMbOemCodePageTag = 0;
 static LCID user_resource_lcid;
 static LCID user_resource_neutral_lcid;
 static LCID system_lcid;
+/* Canonical locale-name MULTI_SZ set by RtlSetProcessPreferredUILanguages(). */
+static WCHAR *process_preferred_ui_languages;
 static NLSTABLEINFO nls_info = { { CP_UTF8 }, { CP_UTF8 } };
 static struct norm_table *norm_tables[16];
 static const NLS_LOCALE_HEADER *locale_table;
@@ -235,17 +237,148 @@ static NTSTATUS get_dummy_preferred_ui_language( DWORD flags, LANGID lang, ULONG
 
 }
 
+static NTSTATUS format_preferred_ui_languages( DWORD flags, const WCHAR *languages,
+                                               ULONG *count, WCHAR *buffer, ULONG *size )
+{
+    WCHAR id[5];
+    const WCHAR *src;
+    ULONG needed = 1, num = 0;
+    WCHAR *dst = buffer;
+
+    if (!count || !size) return STATUS_INVALID_PARAMETER;
+    if ((flags & MUI_LANGUAGE_NAME) && (flags & MUI_LANGUAGE_ID)) return STATUS_INVALID_PARAMETER;
+
+    for (src = languages; src && *src; src += wcslen( src ) + 1)
+    {
+        const WCHAR *value = src;
+
+        if (flags & MUI_LANGUAGE_ID)
+        {
+            LCID lcid;
+
+            if (RtlLocaleNameToLcid( src, &lcid, 2 )) continue; /* allow neutral names */
+            swprintf( id, ARRAY_SIZE(id), L"%04X", LANGIDFROMLCID(lcid) );
+            value = id;
+        }
+        needed += wcslen( value ) + 1;
+        num++;
+    }
+
+    if (!buffer || *size < needed)
+    {
+        *size = needed;
+        *count = num;
+        return buffer ? STATUS_BUFFER_TOO_SMALL : STATUS_SUCCESS;
+    }
+
+    for (src = languages; src && *src; src += wcslen( src ) + 1)
+    {
+        const WCHAR *value = src;
+        SIZE_T len;
+
+        if (flags & MUI_LANGUAGE_ID)
+        {
+            LCID lcid;
+
+            if (RtlLocaleNameToLcid( src, &lcid, 2 )) continue; /* allow neutral names */
+            swprintf( id, ARRAY_SIZE(id), L"%04X", LANGIDFROMLCID(lcid) );
+            value = id;
+        }
+        len = wcslen( value ) + 1;
+        memcpy( dst, value, len * sizeof(WCHAR) );
+        dst += len;
+    }
+    *dst = 0;
+    *size = needed;
+    *count = num;
+    return STATUS_SUCCESS;
+}
+
+static NTSTATUS set_preferred_ui_languages( DWORD flags, PCZZWSTR buffer, WCHAR **languages,
+                                            ULONG *count )
+{
+    const DWORD valid_flags = MUI_LANGUAGE_NAME | MUI_LANGUAGE_ID | MUI_CONSOLE_FILTER |
+                              MUI_COMPLEX_SCRIPT_FILTER | MUI_RESET_FILTERS;
+    const WCHAR *src;
+    WCHAR *list, *dst;
+    ULONG num = 0, capacity = 1;
+
+    if (!count || (flags & ~valid_flags) ||
+        ((flags & MUI_LANGUAGE_NAME) && (flags & MUI_LANGUAGE_ID)))
+        return STATUS_INVALID_PARAMETER;
+    if (!(flags & (MUI_LANGUAGE_NAME | MUI_LANGUAGE_ID))) return STATUS_INVALID_PARAMETER;
+
+    if (!buffer || !*buffer)
+    {
+        RtlFreeHeap( GetProcessHeap(), 0, *languages );
+        *languages = NULL;
+        *count = 0;
+        return STATUS_SUCCESS;
+    }
+
+    for (src = buffer; *src; src += wcslen( src ) + 1)
+        capacity += LOCALE_NAME_MAX_LENGTH + 1;
+    if (!(list = RtlAllocateHeap( GetProcessHeap(), 0, capacity * sizeof(WCHAR) )))
+        return STATUS_NO_MEMORY;
+
+    dst = list;
+    for (src = buffer; *src; src += wcslen( src ) + 1)
+    {
+        UNICODE_STRING name;
+        WCHAR locale_name[LOCALE_NAME_MAX_LENGTH];
+        LCID lcid;
+        SIZE_T len;
+
+        if (flags & MUI_LANGUAGE_ID)
+        {
+            WCHAR *end;
+            ULONG value = wcstoul( src, &end, 16 );
+
+            if (*end || value > 0xffff) continue;
+            lcid = MAKELCID( value, SORT_DEFAULT );
+        }
+        else if (RtlLocaleNameToLcid( src, &lcid, 2 )) continue; /* allow neutral names */
+
+        name.Buffer = locale_name;
+        name.MaximumLength = sizeof(locale_name);
+        if (RtlLcidToLocaleName( lcid, &name, 2, FALSE )) continue; /* allow neutral names */
+        len = wcslen( locale_name ) + 1;
+        memcpy( dst, locale_name, len * sizeof(WCHAR) );
+        dst += len;
+        num++;
+    }
+    *dst = 0;
+    if (!num)
+    {
+        RtlFreeHeap( GetProcessHeap(), 0, list );
+        *count = 0;
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    RtlFreeHeap( GetProcessHeap(), 0, *languages );
+    *languages = list;
+    *count = num;
+    return STATUS_SUCCESS;
+}
+
 /**************************************************************************
  *      RtlGetProcessPreferredUILanguages   (NTDLL.@)
  */
 NTSTATUS WINAPI RtlGetProcessPreferredUILanguages( DWORD flags, ULONG *count, WCHAR *buffer, ULONG *size )
 {
     LANGID ui_language;
+    NTSTATUS status;
 
-    FIXME( "%08lx, %p, %p %p\n", flags, count, buffer, size );
-
-    NtQueryDefaultUILanguage( &ui_language );
-    return get_dummy_preferred_ui_language( flags, ui_language, count, buffer, size );
+    RtlAcquirePebLock();
+    if (process_preferred_ui_languages)
+        status = format_preferred_ui_languages( flags, process_preferred_ui_languages, count, buffer, size );
+    else
+    {
+        NtQueryDefaultUILanguage( &ui_language );
+        status = get_dummy_preferred_ui_language( flags, ui_language, count, buffer, size );
+    }
+    RtlReleasePebLock();
+    return status;
 }
 
 
@@ -271,12 +404,22 @@ NTSTATUS WINAPI RtlGetSystemPreferredUILanguages( DWORD flags, ULONG unknown, UL
  */
 NTSTATUS WINAPI RtlGetThreadPreferredUILanguages( DWORD flags, ULONG *count, WCHAR *buffer, ULONG *size )
 {
+    WCHAR *languages = NtCurrentTeb()->PreferredLanguages;
     LANGID ui_language;
+    NTSTATUS status;
 
-    FIXME( "%08lx, %p, %p %p\n", flags, count, buffer, size );
+    if (languages) return format_preferred_ui_languages( flags, languages, count, buffer, size );
 
-    NtQueryDefaultUILanguage( &ui_language );
-    return get_dummy_preferred_ui_language( flags, ui_language, count, buffer, size );
+    RtlAcquirePebLock();
+    if (process_preferred_ui_languages)
+        status = format_preferred_ui_languages( flags, process_preferred_ui_languages, count, buffer, size );
+    else
+    {
+        NtQueryDefaultUILanguage( &ui_language );
+        status = get_dummy_preferred_ui_language( flags, ui_language, count, buffer, size );
+    }
+    RtlReleasePebLock();
+    return status;
 }
 
 
@@ -302,8 +445,12 @@ NTSTATUS WINAPI RtlGetUserPreferredUILanguages( DWORD flags, ULONG unknown, ULON
  */
 NTSTATUS WINAPI RtlSetProcessPreferredUILanguages( DWORD flags, PCZZWSTR buffer, ULONG *count )
 {
-    FIXME( "%lu, %p, %p\n", flags, buffer, count );
-    return STATUS_SUCCESS;
+    NTSTATUS status;
+
+    RtlAcquirePebLock();
+    status = set_preferred_ui_languages( flags, buffer, &process_preferred_ui_languages, count );
+    RtlReleasePebLock();
+    return status;
 }
 
 
@@ -312,8 +459,9 @@ NTSTATUS WINAPI RtlSetProcessPreferredUILanguages( DWORD flags, PCZZWSTR buffer,
  */
 NTSTATUS WINAPI RtlSetThreadPreferredUILanguages( DWORD flags, PCZZWSTR buffer, ULONG *count )
 {
-    FIXME( "%lu, %p, %p\n", flags, buffer, count );
-    return STATUS_SUCCESS;
+    WCHAR **languages = (WCHAR **)&NtCurrentTeb()->PreferredLanguages;
+
+    return set_preferred_ui_languages( flags, buffer, languages, count );
 }
 
 
