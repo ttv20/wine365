@@ -49,20 +49,25 @@ thread shutdown.  With this implementation, the same isolated Hebrew prefix
 continues running for more than 60 seconds after all 453 `Office16/1033` fallback
 files are removed again.
 
-A separate rendering defect produced square glyphs throughout the Hebrew UI,
-including Word's search box.  Targeted GDI tracing and a Win32 glyph probe showed
-that Office selects Tahoma and every tested Hebrew `GetGlyphIndicesW()` result was
-`0xffff`.  Wine's bundled metric-compatible Tahoma has no Hebrew outlines.
-`FontLink` loaded a Hebrew font but could not satisfy Office's glyph-index check.
-Wine also tried an installed original family before its configured
-`FontSubstitutes` replacement, making a Tahoma replacement ineffective for
-`DEFAULT_CHARSET`.
+A separate rendering defect produced square glyphs throughout the Hebrew UI.
+Targeted GDI tracing and a Win32 glyph probe showed that Office selects Tahoma
+and every tested Hebrew `GetGlyphIndicesW()` result was `0xffff`. Wine's bundled
+metric-compatible Tahoma had no Hebrew outlines. `FontLink` loaded a Hebrew font
+but could not satisfy Office's direct glyph-index checks.
 
-`dlls/win32u/font.c` now gives an explicit font substitution priority over the
-original family.  `wine.inf` maps Tahoma to Liberation Sans, and the Wine 365
-runtime bundles the Liberation Sans faces in its private Wine font directory.
-The glyph probe then returns real glyph indices (`0507,0509,0514,0505,0519`), and
-the full Word UI, including the search placeholder, renders readable Hebrew.
+A temporary Tahoma-to-Liberation-Sans `FontSubstitutes` implementation proved the
+GDI cause and fixed the normal UI plus the legacy Save As dialog. It did not fix
+the File welcome-page search field. DirectWrite tracing showed why: that Office
+control asks a Tahoma font face for glyph indices directly, bypassing both GDI
+substitution and normal DirectWrite fallback.
+
+`fonts/tahoma.ttf` and `fonts/tahomabd.ttf` now retain the Wine Tahoma family and
+append only the Hebrew U+0590-U+05FF and U+FB1D-U+FB4F outlines/OpenType layout
+data from Liberation Sans. The generation helper, exact hashes, provenance, and
+SIL OFL license are stored beside the font inputs. No Tahoma registry
+substitution or private fallback-font installation is required. With the direct
+font-face fix, the GDI probe returns non-missing glyphs and both the Save As
+dialog and File welcome-page `חיפוש קובץ` field render readable Hebrew.
 
 ## Causal startup findings
 

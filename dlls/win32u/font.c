@@ -2200,18 +2200,13 @@ static struct gdi_font_face *find_matching_face_by_name( const WCHAR *name, cons
     struct gdi_font_family *family;
     struct gdi_font_face *face;
 
-    /* A FontSubstitutes entry replaces the requested family even when the
-     * original family exists.  Trying the original first makes substitutions
-     * ineffective for DEFAULT_CHARSET and leaves Wine's metric-compatible
-     * Tahoma (which has no Hebrew glyphs) selected instead of its configured
-     * Unicode-capable replacement. */
+    family = find_family_from_any_name( name );
+    if (family && (face = find_best_matching_face( family, lf, fs, can_use_bitmap ))) goto found;
     if (subst)
     {
         family = find_family_from_any_name( subst );
         if (family && (face = find_best_matching_face( family, lf, fs, can_use_bitmap ))) goto found;
     }
-    family = find_family_from_any_name( name );
-    if (family && (face = find_best_matching_face( family, lf, fs, can_use_bitmap ))) goto found;
 
     /* search by full face name */
     WINE_RB_FOR_EACH_ENTRY( family, &family_name_tree, struct gdi_font_family, name_entry )
