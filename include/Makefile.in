@@ -255,6 +255,8 @@ SOURCES = \
 	dinput.h \
 	dinputd.h \
 	directmanipulation.idl \
+	deliveryoptimization.idl \
+	deliveryoptimizationerrors.h \
 	dispatcherqueue.idl \
 	dispdib.h \
 	dispex.idl \

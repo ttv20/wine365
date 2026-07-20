@@ -1,0 +1,168 @@
+/*
+ * Delivery Optimization interfaces
+ *
+ * Copyright 2026 Wine 365 project
+ *
+ * This library is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation; either
+ * version 2.1 of the License, or (at your option) any later version.
+ */
+
+#ifndef DO_NO_IMPORTS
+import "oaidl.idl";
+import "bits.idl";
+import "bits2_0.idl";
+#endif
+
+cpp_quote("#include \"deliveryoptimizationerrors.h\"")
+cpp_quote("#define DO_UNKNOWN_FILE_SIZE (UINT64)(-1)")
+
+typedef enum _DownloadMode
+{
+    DownloadMode_CdnOnly = 0,
+    DownloadMode_Lan = 1,
+    DownloadMode_Group = 2,
+    DownloadMode_Internet = 3,
+    DownloadMode_Simple = 99,
+    DownloadMode_Bypass = 100
+} DownloadMode;
+
+typedef enum _SwarmStatus
+{
+    SwarmStatus_Downloading = 0,
+    SwarmStatus_Complete = 1,
+    SwarmStatus_Caching = 2,
+    SwarmStatus_Paused = 3
+} SwarmStatus;
+
+typedef struct _DOSwarmStats
+{
+    LPWSTR fileId;
+    LPWSTR sourceURL;
+    UINT64 fileSize;
+    UINT64 totalBytesDownloaded;
+    UINT64 bytesFromLanPeers;
+    UINT64 bytesFromGroupPeers;
+    UINT64 bytesFromInternetPeers;
+    UINT64 bytesFromHttp;
+    UINT64 bytesFromDoinc;
+    UINT64 bytesToLanPeers;
+    UINT64 bytesToGroupPeers;
+    UINT64 bytesToInternetPeers;
+    UINT httpConnectionCount;
+    UINT doincConnectionCount;
+    UINT lanConnectionCount;
+    UINT groupConnectionCount;
+    UINT internetConnectionCount;
+    UINT downloadDuration;
+    DownloadMode downloadMode;
+    SwarmStatus status;
+    BOOL isBackground;
+} DOSwarmStats;
+
+typedef enum _DeliveryOptimizationJobProperty
+{
+    DOJobPropertyId_ExtendedErrorInfo = 0
+} DOJobPropertyId;
+
+typedef enum _DeliveryOptimizationFileProperty
+{
+    DOFilePropertyId_DecryptionInfo = 0,
+    DOFilePropertyId_IntegrityCheckInfo,
+    DOFilePropertyId_IntegrityCheckMandatory,
+    DOFilePropertyId_DownloadSinkInterface,
+    DOFilePropertyId_DownloadSinkFilePath,
+    DOFilePropertyId_DownloadSinkMemoryStream,
+    DOFilePropertyId_TotalSizeBytes
+} DOFilePropertyId;
+
+[
+    object,
+    uuid(ee2584cf-a69c-4848-b633-2649962b3ef7),
+    pointer_default(unique)
+]
+interface IDeliveryOptimizationJob : IUnknown
+{
+    HRESULT AddFileWithRanges(
+        [in] LPCWSTR fileId,
+        [in] LPCWSTR remoteUrl,
+        [in] LPCWSTR localName,
+        [in] DWORD rangeCount,
+        [in, size_is(rangeCount), unique] BG_FILE_RANGE ranges[],
+        [in] UINT64 fileSize);
+}
+
+[
+    object,
+    uuid(18995a26-bf59-4abe-9f8b-d5092d5a2405),
+    pointer_default(unique)
+]
+interface IDeliveryOptimizationJob2 : IUnknown
+{
+    HRESULT AddFile(
+        [in] LPCWSTR fileId,
+        [in, unique] LPCWSTR remoteUrl,
+        [in] DWORD rangeCount,
+        [in, size_is(rangeCount), unique] BG_FILE_RANGE ranges[],
+        [in] REFIID riid,
+        [out, iid_is(riid)] void **object);
+
+    HRESULT GetProperty(
+        [in] DOJobPropertyId propId,
+        [out] VARIANT *propValue);
+
+    HRESULT SetProperty(
+        [in] DOJobPropertyId propId,
+        [in, unique] const VARIANT *propValue);
+}
+
+[
+    object,
+    uuid(b76b9699-e99e-4101-803f-a20e325d93e2),
+    pointer_default(unique)
+]
+interface IDeliveryOptimizationFile : IUnknown
+{
+    HRESULT GetStats([out] DOSwarmStats *swarmStats);
+
+    /* Office Click-to-Run uses the second post-IUnknown vtable slot for
+     * GetStats. Keep the documented slot above as well for SDK clients. */
+    HRESULT GetStats2([out] DOSwarmStats *swarmStats);
+}
+
+[
+    object,
+    uuid(3a87296f-6ec2-4126-ab29-e3f8dc4cc390),
+    pointer_default(unique)
+]
+interface IDeliveryOptimizationFile2 : IUnknown
+{
+    HRESULT GetProperty(
+        [in] DOFilePropertyId propId,
+        [out] VARIANT *propValue);
+
+    HRESULT SetProperty(
+        [in] DOFilePropertyId propId,
+        [in, unique] const VARIANT *propValue);
+}
+
+[
+    uuid(6a1fae95-21b8-46c4-a0c9-5d5fae106ef0),
+    version(1.0)
+]
+library DeliveryOptimization
+{
+    [
+        uuid(5b99fa76-721c-423c-adac-56d03c8a8007)
+    ]
+    coclass DeliveryOptimization
+    {
+        [default] interface IBackgroundCopyManager;
+    };
+
+    interface IDeliveryOptimizationJob;
+    interface IDeliveryOptimizationJob2;
+    interface IDeliveryOptimizationFile;
+    interface IDeliveryOptimizationFile2;
+}
