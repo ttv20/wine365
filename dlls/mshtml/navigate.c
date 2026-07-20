@@ -920,7 +920,7 @@ static HRESULT read_post_data_stream(nsIInputStream *stream, BOOL contains_heade
             char *ptr;
 
             post_data += data_len;
-            for(ptr = data; ptr+4 < data+data_len; ptr++) {
+            for(ptr = data; ptr+4 <= data+data_len; ptr++) {
                 if(!memcmp(ptr, "\r\n\r\n", 4)) {
                     ptr += 2;
                     post_data = ptr+2;
@@ -928,21 +928,28 @@ static HRESULT read_post_data_stream(nsIInputStream *stream, BOOL contains_heade
                 }
             }
 
-            data_len -= post_data-data;
-
-            size = MultiByteToWideChar(CP_ACP, 0, data, ptr-data, NULL, 0);
-            headers = malloc((size + 1) * sizeof(WCHAR));
-            if(headers) {
-                MultiByteToWideChar(CP_ACP, 0, data, ptr-data, headers, size);
-                headers[size] = 0;
-                if(headers_list)
-                    hres = parse_headers(headers, headers_list);
-                if(SUCCEEDED(hres))
-                    request_data->headers = headers;
-                else
-                    free(headers);
+            /* Gecko may provide a form-submit stream containing only the
+             * encoded body.  Do not mistake that body for MIME headers and
+             * silently turn the submission into a GET request. */
+            if(post_data == data+data_len) {
+                post_data = data;
             }else {
-                hres = E_OUTOFMEMORY;
+                data_len -= post_data-data;
+
+                size = MultiByteToWideChar(CP_ACP, 0, data, ptr-data, NULL, 0);
+                headers = malloc((size + 1) * sizeof(WCHAR));
+                if(headers) {
+                    MultiByteToWideChar(CP_ACP, 0, data, ptr-data, headers, size);
+                    headers[size] = 0;
+                    if(headers_list)
+                        hres = parse_headers(headers, headers_list);
+                    if(SUCCEEDED(hres))
+                        request_data->headers = headers;
+                    else
+                        free(headers);
+                }else {
+                    hres = E_OUTOFMEMORY;
+                }
             }
         }
     }
@@ -1732,13 +1739,21 @@ static HRESULT nsChannelBSC_on_progress(BSCallback *bsc, ULONG progress, ULONG t
         free(This->nschannel->content_type);
         This->nschannel->content_type = strdupWtoA(status_text);
         break;
-    case BINDSTATUS_REDIRECTING:
+    case BINDSTATUS_REDIRECTING: {
+        HRESULT hres;
+
         if(This->is_doc_channel) {
             This->bsc.window->redirect_count++;
             if(!This->bsc.window->redirect_time)
                 This->bsc.window->redirect_time = get_time_stamp();
         }
-        return handle_redirect(This, status_text);
+        hres = handle_redirect(This, status_text);
+        if(SUCCEEDED(hres) && This->is_doc_channel && This->bsc.window &&
+           !is_detached_window(This->bsc.window))
+            hres = navigate_url(This->bsc.window->base.outer_window, status_text, NULL,
+                                BINDING_NAVIGATED | BINDING_REPLACE);
+        return hres;
+    }
     case BINDSTATUS_FINDINGRESOURCE:
         if(This->is_doc_channel && !This->bsc.window->dns_lookup_time)
             This->bsc.window->dns_lookup_time = get_time_stamp();
@@ -1762,7 +1777,7 @@ static HRESULT nsChannelBSC_on_progress(BSCallback *bsc, ULONG progress, ULONG t
                 hres = IWinInetHttpInfo_QueryInfo(http_info,
                         HTTP_QUERY_STATUS_CODE|HTTP_QUERY_FLAG_NUMBER, &status, &size, NULL, NULL);
                 IWinInetHttpInfo_Release(http_info);
-                if(SUCCEEDED(hres) && status != HTTP_STATUS_OK)
+                if(SUCCEEDED(hres) && status >= HTTP_STATUS_BAD_REQUEST)
                     handle_navigation_error(This, status);
             }
         }
@@ -2339,8 +2354,11 @@ HRESULT super_navigate(HTMLOuterWindow *window, IUri *uri, DWORD flags, const WC
         hres = push_task(&task->header, navigate_javascript_proc, navigate_javascript_task_destr, window->task_magic);
     }else if(flags & BINDING_SUBMIT) {
         hres = set_moniker(window, mon, uri, NULL, bsc, TRUE);
-        if(SUCCEEDED(hres))
+        if(SUCCEEDED(hres)) {
+            set_current_mon(window, bsc->bsc.mon, flags);
+            set_current_uri(window, uri);
             hres = start_binding(window->pending_window, &bsc->bsc, NULL);
+        }
         IBindStatusCallback_Release(&bsc->bsc.IBindStatusCallback_iface);
         IMoniker_Release(mon);
     }else {

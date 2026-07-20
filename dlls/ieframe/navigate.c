@@ -282,7 +282,7 @@ static HRESULT WINAPI BindStatusCallback_OnProgress(IBindStatusCallback *iface,
     case BINDSTATUS_BEGINDOWNLOADDATA:
         set_status_text(This, ulStatusCode, szStatusText);
         status_code = get_http_status_code(This->binding);
-        if(status_code != HTTP_STATUS_OK)
+        if(status_code >= HTTP_STATUS_BAD_REQUEST)
             handle_navigation_error(This->doc_host, status_code, This->url, NULL);
         return S_OK;
 
