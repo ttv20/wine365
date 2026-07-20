@@ -468,6 +468,67 @@ static const ISequentialStreamVtbl teststreamvtbl =
     teststream_Write
 };
 
+struct split_stream
+{
+    ISequentialStream ISequentialStream_iface;
+    const char *data;
+    ULONG size;
+    ULONG pos;
+    ULONG chunk_size;
+};
+
+static inline struct split_stream *impl_from_split_stream(ISequentialStream *iface)
+{
+    return CONTAINING_RECORD(iface, struct split_stream, ISequentialStream_iface);
+}
+
+static HRESULT WINAPI split_stream_QueryInterface(ISequentialStream *iface, REFIID riid, void **obj)
+{
+    if (IsEqualIID(riid, &IID_IUnknown) || IsEqualIID(riid, &IID_ISequentialStream))
+    {
+        *obj = iface;
+        return S_OK;
+    }
+
+    *obj = NULL;
+    return E_NOINTERFACE;
+}
+
+static ULONG WINAPI split_stream_AddRef(ISequentialStream *iface)
+{
+    return 2;
+}
+
+static ULONG WINAPI split_stream_Release(ISequentialStream *iface)
+{
+    return 1;
+}
+
+static HRESULT WINAPI split_stream_Read(ISequentialStream *iface, void *buffer, ULONG size, ULONG *read)
+{
+    struct split_stream *stream = impl_from_split_stream(iface);
+
+    *read = min(size, min(stream->chunk_size, stream->size - stream->pos));
+    memcpy(buffer, stream->data + stream->pos, *read);
+    stream->pos += *read;
+    return *read ? S_OK : S_FALSE;
+}
+
+static HRESULT WINAPI split_stream_Write(ISequentialStream *iface, const void *buffer, ULONG size, ULONG *written)
+{
+    ok(0, "unexpected call\n");
+    return E_NOTIMPL;
+}
+
+static const ISequentialStreamVtbl split_stream_vtbl =
+{
+    split_stream_QueryInterface,
+    split_stream_AddRef,
+    split_stream_Release,
+    split_stream_Read,
+    split_stream_Write
+};
+
 static HRESULT WINAPI resolver_QI(IXmlResolver *iface, REFIID riid, void **obj)
 {
     ok(0, "unexpected call, riid %s\n", wine_dbgstr_guid(riid));
@@ -1595,6 +1656,30 @@ static void test_read_pending(void)
     IXmlReader_Release(reader);
 }
 
+static void test_utf8_chunk_boundary(void)
+{
+    static const char xml[] = "<a>\xd7\x90</a>";
+    struct split_stream stream = {{&split_stream_vtbl}, xml, sizeof(xml) - 1, 0, 4};
+    IXmlReader *reader;
+    HRESULT hr;
+
+    hr = CreateXmlReader(&IID_IXmlReader, (void **)&reader, NULL);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+
+    hr = IXmlReader_SetInput(reader, (IUnknown *)&stream.ISequentialStream_iface);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+
+    read_node(reader, XmlNodeType_Element);
+    reader_name(reader, L"a");
+    read_node(reader, XmlNodeType_Text);
+    reader_value(reader, L"\x05d0");
+    read_node(reader, XmlNodeType_EndElement);
+    reader_name(reader, L"a");
+    read_node(reader, XmlNodeType_None);
+
+    IXmlReader_Release(reader);
+}
+
 static void test_readvaluechunk(void)
 {
     IXmlReader *reader;
@@ -2687,6 +2772,7 @@ START_TEST(reader)
     test_read_text();
     test_read_full();
     test_read_pending();
+    test_utf8_chunk_boundary();
     test_readvaluechunk();
     test_read_xmldeclaration();
     test_reader_properties();

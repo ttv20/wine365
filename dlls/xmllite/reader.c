@@ -964,14 +964,15 @@ static int readerinput_get_convlen(xmlreaderinput *readerinput)
 static void readerinput_shrinkraw(xmlreaderinput *readerinput, int len)
 {
     encoded_buffer *buffer = &readerinput->buffer->encoded;
+    unsigned int remaining;
 
     if (len == -1)
         len = readerinput_get_convlen(readerinput);
 
-    assert(len >= 0);
-    memmove(buffer->data, buffer->data + buffer->cur + (buffer->written - len), len);
-    /* everything below cur is lost too */
-    buffer->written -= len + buffer->cur;
+    assert(len >= 0 && len <= buffer->written - buffer->cur);
+    remaining = buffer->written - buffer->cur - len;
+    memmove(buffer->data, buffer->data + buffer->cur + len, remaining);
+    buffer->written = remaining;
     /* after this point we don't need cur offset really,
        it's used only to mark where actual data begins when first chunk is read */
     buffer->cur = 0;
