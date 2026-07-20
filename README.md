@@ -22,7 +22,9 @@ machine, Office edition, account, or Wine prefix.
 
 In the tested installation, Word can:
 
-- launch after a fresh Microsoft Office installation;
+- install through Office Click-to-Run's Delivery Optimization path and launch
+  after a fresh installation;
+- expose automatic Office updates and complete an **Update Now** check;
 - create, edit, save, close, and reopen DOCX files;
 - use core UI, tables, Shapes, WordArt, comments, Save As, PDF export, and print
   preview;
@@ -53,8 +55,8 @@ Wine365 was produced with AI, so it cannot meet this rule. These changes will
 
 Wine365 is based on **Wine 11.12**
 ([`996020f410e`](https://gitlab.winehq.org/wine/wine/-/commit/996020f410e7a1aa2dd6b44cf740854ea524d31a))
-with changes through `c9060040bfb`. The branch changes 137 paths with about
-14,581 insertions and 476 deletions.
+with Wine365 compatibility changes through this branch. Relative to that base,
+the branch changes 151 paths with about 15,963 insertions and 715 deletions.
 
 ### Main changes
 
@@ -65,9 +67,10 @@ with changes through `c9060040bfb`. The branch changes 137 paths with about
   shape shaders, WIC target reuse, geometry fixes, and GDI+ antialiasing.
 - **Wayland and RTL languages:** popup stacking, caption controls, input regions,
   XKB language reporting, and preferred-UI-language handling.
-- **Installation and sign-in:** ranged BITS downloads, `CoCancelCall`, COM
-  teardown, WinHTTP/WinINet compatibility, WAM/OneAuth objects, and federated
-  MSHTML navigation.
+- **Installation, updates, and sign-in:** ranged BITS downloads, an
+  Office-compatible Delivery Optimization service, `CoCancelCall`, COM teardown,
+  WinHTTP/WinINet
+  compatibility, WAM/OneAuth objects, and federated MSHTML navigation.
 - **OAuth:** `wine365auth.exe` runs inside the prefix, uses PKCE, handles federated
   returns, and stores WAM state with DPAPI under
   `%LOCALAPPDATA%\Wine365\WAM` without logging tokens.
@@ -76,6 +79,21 @@ Wine's metric-compatible Tahoma fonts were extended with the RTL glyph ranges
 used by Office. Font generation and licensing details are in
 [`fonts/README.wine365-tahoma-hebrew.md`](fonts/README.wine365-tahoma-hebrew.md)
 and [`fonts/LICENSE.Liberation`](fonts/LICENSE.Liberation).
+
+### Delivery Optimization
+
+Wine365 exposes Office's legacy Delivery Optimization COM interfaces through
+`qmgr`, backed by Wine's BITS and WinHTTP transfer engine. It supports file and
+`IStream` sinks, file/job properties, swarm statistics, and arbitrary CDN byte
+ranges. COM proxy security blankets and generated 32/64-bit proxy/stub code let
+Office use the service across process boundaries.
+
+A clean test installation completed with exit code 0 after Office transferred
+CABs and stream data through this path, including one request containing 2,576
+ranges. Word then launched, its Account page showed automatic updates enabled,
+and **Update Now** reported the installed build current. This implementation is
+direct HTTP/CDN compatibility only; Windows peer discovery, peer sharing, and
+full Delivery Optimization cache policy are not implemented.
 
 ### Build
 
