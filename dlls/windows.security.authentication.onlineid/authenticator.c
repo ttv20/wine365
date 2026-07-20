@@ -18,6 +18,7 @@
  */
 
 #include "private.h"
+#include "wincrypt.h"
 #include "wine/debug.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(onlineid);
@@ -1312,8 +1313,11 @@ struct completed_provider_operation
     IAsyncOperation_IInspectable IAsyncOperation_IInspectable_iface;
     IAsyncInfo IAsyncInfo_iface;
     LONG ref;
+    CRITICAL_SECTION cs;
     IInspectable *result;
     IAsyncOperationCompletedHandler_IInspectable *handler;
+    AsyncStatus status;
+    HRESULT error;
     BOOL closed;
 };
 
@@ -1360,6 +1364,7 @@ static ULONG WINAPI completed_async_Release( IAsyncOperation_IInspectable *iface
     {
         if (impl->handler) IAsyncOperationCompletedHandler_IInspectable_Release( impl->handler );
         if (impl->result) IInspectable_Release( impl->result );
+        DeleteCriticalSection( &impl->cs );
         free( impl );
     }
     return ref;
@@ -1392,16 +1397,25 @@ static HRESULT WINAPI completed_async_put_Completed( IAsyncOperation_IInspectabl
         IAsyncOperationCompletedHandler_IInspectable *handler )
 {
     struct completed_provider_operation *impl = impl_from_async_operation( iface );
-    HRESULT hr;
+    AsyncStatus status;
+    HRESULT hr = S_OK;
 
     TRACE( "async iface %p, handler %p.\n", iface, handler );
-    if (impl->closed) return E_ILLEGAL_METHOD_CALL;
-    if (impl->handler) return E_ILLEGAL_DELEGATE_ASSIGNMENT;
     if (!handler) return E_POINTER;
-    IAsyncOperationCompletedHandler_IInspectable_AddRef( handler );
-    impl->handler = handler;
+    EnterCriticalSection( &impl->cs );
+    if (impl->closed) hr = E_ILLEGAL_METHOD_CALL;
+    else if (impl->handler) hr = E_ILLEGAL_DELEGATE_ASSIGNMENT;
+    else
+    {
+        IAsyncOperationCompletedHandler_IInspectable_AddRef( handler );
+        impl->handler = handler;
+    }
+    status = impl->status;
+    LeaveCriticalSection( &impl->cs );
+    if (FAILED(hr) || status == Started) return hr;
+
     completed_async_AddRef( iface );
-    hr = IAsyncOperationCompletedHandler_IInspectable_Invoke( handler, iface, Completed );
+    hr = IAsyncOperationCompletedHandler_IInspectable_Invoke( handler, iface, status );
     TRACE( "handler %p returned %#lx.\n", handler, hr );
     completed_async_Release( iface );
     return hr;
@@ -1412,19 +1426,30 @@ static HRESULT WINAPI completed_async_get_Completed( IAsyncOperation_IInspectabl
 {
     struct completed_provider_operation *impl = impl_from_async_operation( iface );
     if (!handler) return E_POINTER;
-    if (impl->closed) return E_ILLEGAL_METHOD_CALL;
+    EnterCriticalSection( &impl->cs );
+    if (impl->closed)
+    {
+        LeaveCriticalSection( &impl->cs );
+        return E_ILLEGAL_METHOD_CALL;
+    }
     if ((*handler = impl->handler)) IAsyncOperationCompletedHandler_IInspectable_AddRef( *handler );
+    LeaveCriticalSection( &impl->cs );
     return S_OK;
 }
 
 static HRESULT WINAPI completed_async_GetResults( IAsyncOperation_IInspectable *iface, IInspectable **result )
 {
     struct completed_provider_operation *impl = impl_from_async_operation( iface );
+    HRESULT hr = S_OK;
     if (!result) return E_POINTER;
-    if (impl->closed) return E_ILLEGAL_METHOD_CALL;
-    IInspectable_AddRef( *result = impl->result );
-    TRACE( "async iface %p returned result %p.\n", iface, *result );
-    return S_OK;
+    *result = NULL;
+    EnterCriticalSection( &impl->cs );
+    if (impl->closed || impl->status == Started) hr = E_ILLEGAL_METHOD_CALL;
+    else if (impl->status == Error) hr = impl->error;
+    else if ((*result = impl->result)) IInspectable_AddRef( *result );
+    LeaveCriticalSection( &impl->cs );
+    TRACE( "async iface %p returned result %p, hr %#lx.\n", iface, *result, hr );
+    return hr;
 }
 
 static const IAsyncOperation_IInspectableVtbl completed_async_vtbl =
@@ -1474,28 +1499,54 @@ static HRESULT WINAPI completed_info_get_Id( IAsyncInfo *iface, UINT32 *id )
 
 static HRESULT WINAPI completed_info_get_Status( IAsyncInfo *iface, AsyncStatus *status )
 {
+    struct completed_provider_operation *impl = impl_from_async_info( iface );
     if (!status) return E_POINTER;
-    if (impl_from_async_info( iface )->closed) return E_ILLEGAL_METHOD_CALL;
-    *status = Completed;
+    EnterCriticalSection( &impl->cs );
+    if (impl->closed)
+    {
+        LeaveCriticalSection( &impl->cs );
+        return E_ILLEGAL_METHOD_CALL;
+    }
+    *status = impl->status;
+    LeaveCriticalSection( &impl->cs );
     return S_OK;
 }
 
 static HRESULT WINAPI completed_info_get_ErrorCode( IAsyncInfo *iface, HRESULT *error )
 {
+    struct completed_provider_operation *impl = impl_from_async_info( iface );
     if (!error) return E_POINTER;
-    if (impl_from_async_info( iface )->closed) return E_ILLEGAL_METHOD_CALL;
-    *error = S_OK;
+    EnterCriticalSection( &impl->cs );
+    if (impl->closed)
+    {
+        LeaveCriticalSection( &impl->cs );
+        return E_ILLEGAL_METHOD_CALL;
+    }
+    *error = impl->error;
+    LeaveCriticalSection( &impl->cs );
     return S_OK;
 }
 
 static HRESULT WINAPI completed_info_Cancel( IAsyncInfo *iface )
 {
-    return impl_from_async_info( iface )->closed ? E_ILLEGAL_METHOD_CALL : S_OK;
+    struct completed_provider_operation *impl = impl_from_async_info( iface );
+    EnterCriticalSection( &impl->cs );
+    if (impl->closed)
+    {
+        LeaveCriticalSection( &impl->cs );
+        return E_ILLEGAL_METHOD_CALL;
+    }
+    if (impl->status == Started) impl->status = Canceled;
+    LeaveCriticalSection( &impl->cs );
+    return S_OK;
 }
 
 static HRESULT WINAPI completed_info_Close( IAsyncInfo *iface )
 {
-    impl_from_async_info( iface )->closed = TRUE;
+    struct completed_provider_operation *impl = impl_from_async_info( iface );
+    EnterCriticalSection( &impl->cs );
+    impl->closed = TRUE;
+    LeaveCriticalSection( &impl->cs );
     return S_OK;
 }
 
@@ -1507,7 +1558,9 @@ static const IAsyncInfoVtbl completed_info_vtbl =
     completed_info_Cancel, completed_info_Close,
 };
 
-static HRESULT completed_provider_operation_create( IInspectable *result, IInspectable **out )
+static HRESULT provider_operation_create( AsyncStatus status, IInspectable *result,
+                                          struct completed_provider_operation **impl_out,
+                                          IInspectable **out )
 {
     struct completed_provider_operation *impl;
     if (!out) return E_POINTER;
@@ -1516,9 +1569,43 @@ static HRESULT completed_provider_operation_create( IInspectable *result, IInspe
     impl->IAsyncOperation_IInspectable_iface.lpVtbl = &completed_async_vtbl;
     impl->IAsyncInfo_iface.lpVtbl = &completed_info_vtbl;
     impl->ref = 1;
-    IInspectable_AddRef( impl->result = result );
+    impl->status = status;
+    impl->error = S_OK;
+    InitializeCriticalSection( &impl->cs );
+    if ((impl->result = result)) IInspectable_AddRef( result );
+    if (impl_out) *impl_out = impl;
     *out = (IInspectable *)&impl->IAsyncOperation_IInspectable_iface;
     return S_OK;
+}
+
+static HRESULT completed_provider_operation_create( IInspectable *result, IInspectable **out )
+{
+    return provider_operation_create( Completed, result, NULL, out );
+}
+
+static void provider_operation_complete( struct completed_provider_operation *impl,
+                                         IInspectable *result, AsyncStatus status, HRESULT error )
+{
+    IAsyncOperationCompletedHandler_IInspectable *handler = NULL;
+    IAsyncOperation_IInspectable *iface = &impl->IAsyncOperation_IInspectable_iface;
+
+    EnterCriticalSection( &impl->cs );
+    if (impl->status == Started)
+    {
+        if ((impl->result = result)) IInspectable_AddRef( result );
+        impl->status = status;
+        impl->error = error;
+        if (!impl->closed && (handler = impl->handler))
+            IAsyncOperationCompletedHandler_IInspectable_AddRef( handler );
+    }
+    LeaveCriticalSection( &impl->cs );
+    if (handler)
+    {
+        completed_async_AddRef( iface );
+        IAsyncOperationCompletedHandler_IInspectable_Invoke( handler, iface, status );
+        IAsyncOperationCompletedHandler_IInspectable_Release( handler );
+        completed_async_Release( iface );
+    }
 }
 
 /* Minimal empty IVectorView<WebAccount>.  Cached-account enumeration may
@@ -1768,8 +1855,13 @@ static HRESULT find_all_accounts_result_create( BOOL include_account, IInspectab
     if (!(impl = calloc( 1, sizeof(*impl) ))) return E_OUTOFMEMORY;
     impl->lpVtbl = &find_result_vtbl;
     impl->ref = 1;
-    if ((include_account && FAILED(hr = web_account_create( &account ))) ||
-        FAILED(hr = account_vector_create( account, &impl->accounts )))
+    if (include_account && FAILED(hr = web_account_create( &account )) &&
+        hr != HRESULT_FROM_WIN32( ERROR_FILE_NOT_FOUND ))
+    {
+        free( impl );
+        return hr;
+    }
+    if (FAILED(hr = account_vector_create( account, &impl->accounts )))
     {
         if (account) IInspectable_Release( account );
         free( impl );
@@ -2375,6 +2467,61 @@ static HRESULT token_response_vector_create( const WCHAR *token, const WCHAR *sc
     return S_OK;
 }
 
+static WCHAR *utf8_token_to_wide( const char *bytes, DWORD size )
+{
+    WCHAR *token;
+    int len;
+
+    while (size && (bytes[size - 1] == '\r' || bytes[size - 1] == '\n')) --size;
+    if (!(len = MultiByteToWideChar( CP_UTF8, 0, bytes, size, NULL, 0 ))) return NULL;
+    if (!(token = malloc( (len + 1) * sizeof(*token) ))) return NULL;
+    MultiByteToWideChar( CP_UTF8, 0, bytes, size, token, len );
+    token[len] = 0;
+    return token;
+}
+
+static WCHAR *load_encrypted_wam_token( const WCHAR *legacy_path )
+{
+    WCHAR local_appdata[MAX_PATH], path[MAX_PATH], filename[MAX_PATH];
+    DATA_BLOB input = {0}, output = {0};
+    const WCHAR *name;
+    LARGE_INTEGER size;
+    WCHAR *extension;
+    HANDLE file;
+    DWORD read;
+    WCHAR *token = NULL;
+
+    if (!(name = wcsrchr( legacy_path, '\\' ))) return NULL;
+    lstrcpynW( filename, name + 1, ARRAY_SIZE(filename) );
+    if ((extension = wcsrchr( filename, '.' ))) lstrcpyW( extension, L".dat" );
+    if (!GetEnvironmentVariableW( L"LOCALAPPDATA", local_appdata, ARRAY_SIZE(local_appdata) )) return NULL;
+    if (swprintf( path, ARRAY_SIZE(path), L"%s\\Wine365\\WAM\\%s", local_appdata, filename ) < 0) return NULL;
+    file = CreateFileW( path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL );
+    if (file == INVALID_HANDLE_VALUE || !GetFileSizeEx( file, &size ) ||
+        size.QuadPart <= 0 || size.QuadPart > 1024 * 1024)
+    {
+        if (file != INVALID_HANDLE_VALUE) CloseHandle( file );
+        return NULL;
+    }
+    if (!(input.pbData = malloc( size.QuadPart ))) { CloseHandle( file ); return NULL; }
+    input.cbData = size.QuadPart;
+    if (!ReadFile( file, input.pbData, input.cbData, &read, NULL ) || read != input.cbData)
+        goto done;
+    if (!CryptUnprotectData( &input, NULL, NULL, NULL, NULL,
+                             CRYPTPROTECT_UI_FORBIDDEN, &output )) goto done;
+    token = utf8_token_to_wide( (const char *)output.pbData, output.cbData );
+done:
+    CloseHandle( file );
+    if (output.pbData)
+    {
+        SecureZeroMemory( output.pbData, output.cbData );
+        LocalFree( output.pbData );
+    }
+    SecureZeroMemory( input.pbData, input.cbData );
+    free( input.pbData );
+    return token;
+}
+
 static WCHAR *load_wam_token_file( const WCHAR *path )
 {
     HANDLE file;
@@ -2382,8 +2529,11 @@ static WCHAR *load_wam_token_file( const WCHAR *path )
     DWORD read;
     char *bytes;
     WCHAR *token;
-    int len;
 
+    if ((token = load_encrypted_wam_token( path ))) return token;
+
+    /* Retain the diagnostic plaintext input as a compatibility fallback for
+     * existing activated prefixes. New interactive sign-ins use only DPAPI. */
     file = CreateFileW( path, GENERIC_READ, FILE_SHARE_READ, NULL,
                         OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL );
     if (file == INVALID_HANDLE_VALUE || !GetFileSizeEx( file, &size ) || size.QuadPart <= 0 || size.QuadPart > 65536)
@@ -2391,15 +2541,11 @@ static WCHAR *load_wam_token_file( const WCHAR *path )
         if (file != INVALID_HANDLE_VALUE) CloseHandle( file );
         return NULL;
     }
-    if (!(bytes = malloc( size.QuadPart + 1 ))) { CloseHandle( file ); return NULL; }
+    if (!(bytes = malloc( size.QuadPart ))) { CloseHandle( file ); return NULL; }
     if (!ReadFile( file, bytes, size.QuadPart, &read, NULL )) { free( bytes ); CloseHandle( file ); return NULL; }
     CloseHandle( file );
-    bytes[read] = 0;
-    while (read && (bytes[read - 1] == '\r' || bytes[read - 1] == '\n')) bytes[--read] = 0;
-    len = MultiByteToWideChar( CP_UTF8, 0, bytes, read, NULL, 0 );
-    if (!(token = malloc( (len + 1) * sizeof(*token) ))) { free( bytes ); return NULL; }
-    MultiByteToWideChar( CP_UTF8, 0, bytes, read, token, len );
-    token[len] = 0;
+    token = utf8_token_to_wide( bytes, read );
+    SecureZeroMemory( bytes, size.QuadPart );
     free( bytes );
     return token;
 }
@@ -2552,6 +2698,179 @@ static HRESULT web_token_request_result_create( INT32 status, const WCHAR *scope
     }
     *out = (IInspectable *)impl;
     return S_OK;
+}
+
+struct interactive_token_context
+{
+    struct completed_provider_operation *operation;
+    HSTRING scopes;
+    HSTRING login_hint;
+    IInspectable *account;
+    HWND owner;
+};
+
+static HRESULT token_request_get_login_hint( struct web_token_request *request, HSTRING *value )
+{
+    static const WCHAR login_hint_key[] = L"LoginHint";
+    HSTRING key = NULL;
+    HRESULT hr;
+
+    if (!value) return E_POINTER;
+    *value = NULL;
+    if (FAILED(hr = WindowsCreateString( login_hint_key, ARRAY_SIZE(login_hint_key) - 1, &key ))) return hr;
+    hr = string_map_Lookup( (struct string_map *)request->properties, key, value );
+    WindowsDeleteString( key );
+    return hr;
+}
+
+static BOOL write_login_hint_file( HSTRING hint, WCHAR path[MAX_PATH] )
+{
+    WCHAR temp[MAX_PATH];
+    const WCHAR *value;
+    HANDLE file;
+    DWORD written;
+    char *utf8;
+    int size;
+    BOOL ret = FALSE;
+
+    path[0] = 0;
+    if (!hint || !(value = WindowsGetStringRawBuffer( hint, NULL )) || !*value) return TRUE;
+    if (!GetTempPathW( ARRAY_SIZE(temp), temp )) return FALSE;
+    if (GetFileAttributesW( temp ) == INVALID_FILE_ATTRIBUTES)
+    {
+        size_t len = wcslen( temp );
+        if (len && (temp[len - 1] == '\\' || temp[len - 1] == '/')) temp[len - 1] = 0;
+        CreateDirectoryW( temp, NULL );
+        if (len) temp[len - 1] = '\\';
+    }
+    if (!GetTempFileNameW( temp, L"w3a", 0, path )) return FALSE;
+    size = WideCharToMultiByte( CP_UTF8, 0, value, -1, NULL, 0, NULL, NULL );
+    if (size <= 1 || !(utf8 = malloc( size ))) goto done;
+    WideCharToMultiByte( CP_UTF8, 0, value, -1, utf8, size, NULL, NULL );
+    file = CreateFileW( path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS,
+                        FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_TEMPORARY, NULL );
+    if (file != INVALID_HANDLE_VALUE)
+    {
+        ret = WriteFile( file, utf8, size - 1, &written, NULL ) && written == size - 1;
+        CloseHandle( file );
+    }
+    SecureZeroMemory( utf8, size );
+    free( utf8 );
+done:
+    if (!ret) { DeleteFileW( path ); path[0] = 0; }
+    return ret;
+}
+
+static BOOL run_wine365_auth( HWND owner, HSTRING login_hint, BOOL interactive, DWORD *exit_code )
+{
+    WCHAR command[2 * MAX_PATH], hint_path[MAX_PATH];
+    PROCESS_INFORMATION process = {0};
+    STARTUPINFOW startup = {sizeof(startup)};
+    BOOL ret;
+
+    if (!write_login_hint_file( login_hint, hint_path ))
+    {
+        TRACE( "failed to create the auth helper login-hint file, error %lu.\n", GetLastError() );
+        return FALSE;
+    }
+    if (interactive)
+    {
+        if (hint_path[0])
+            swprintf( command, ARRAY_SIZE(command),
+                      L"\"C:\\wine365auth.exe\" --owner 0x%Ix --login-hint-file \"%s\"",
+                      (ULONG_PTR)owner, hint_path );
+        else
+            swprintf( command, ARRAY_SIZE(command), L"\"C:\\wine365auth.exe\" --owner 0x%Ix", (ULONG_PTR)owner );
+    }
+    else lstrcpyW( command, L"\"C:\\wine365auth.exe\" --refresh" );
+
+    ret = CreateProcessW( NULL, command, NULL, NULL, FALSE, 0, NULL, NULL, &startup, &process );
+    if (!ret)
+    {
+        TRACE( "failed to start the auth helper, error %lu.\n", GetLastError() );
+        if (hint_path[0]) DeleteFileW( hint_path );
+        return FALSE;
+    }
+    TRACE( "started the auth helper for %s acquisition.\n", interactive ? "interactive" : "silent" );
+    WaitForSingleObject( process.hProcess, INFINITE );
+    ret = GetExitCodeProcess( process.hProcess, exit_code );
+    TRACE( "auth helper completed, query success %d, exit code %lu.\n", ret, ret ? *exit_code : 0 );
+    CloseHandle( process.hThread );
+    CloseHandle( process.hProcess );
+    if (hint_path[0]) DeleteFileW( hint_path );
+    return ret;
+}
+
+static DWORD WINAPI interactive_token_worker( void *parameter )
+{
+    struct interactive_token_context *context = parameter;
+    IInspectable *result = NULL;
+    DWORD exit_code = 3;
+    INT32 response_status = 4;
+    HRESULT hr;
+
+    if (run_wine365_auth( context->owner, context->login_hint, TRUE, &exit_code ))
+    {
+        if (!exit_code) response_status = 0;
+        else if (exit_code == 2) response_status = 1;
+    }
+    hr = web_token_request_result_create( response_status,
+            WindowsGetStringRawBuffer( context->scopes, NULL ), context->account, &result );
+    if (FAILED(hr) && !response_status)
+        hr = web_token_request_result_create( 4, WindowsGetStringRawBuffer( context->scopes, NULL ),
+                                              context->account, &result );
+    if (SUCCEEDED(hr)) provider_operation_complete( context->operation, result, Completed, S_OK );
+    else provider_operation_complete( context->operation, NULL, Error, hr );
+    if (result) IInspectable_Release( result );
+    if (context->account) IInspectable_Release( context->account );
+    WindowsDeleteString( context->scopes );
+    WindowsDeleteString( context->login_hint );
+    completed_async_Release( &context->operation->IAsyncOperation_IInspectable_iface );
+    free( context );
+    return 0;
+}
+
+static HRESULT create_pending_interactive_token_operation( HWND owner, struct web_token_request *request,
+                                                            IInspectable *account, REFIID iid, void **out )
+{
+    struct completed_provider_operation *impl;
+    struct interactive_token_context *context;
+    IInspectable *operation = NULL;
+    HANDLE thread;
+    HRESULT hr;
+
+    if (!out) return E_POINTER;
+    *out = NULL;
+    if (!(context = calloc( 1, sizeof(*context) ))) return E_OUTOFMEMORY;
+    if (FAILED(hr = provider_operation_create( Started, NULL, &impl, &operation )))
+    {
+        free( context );
+        return hr;
+    }
+    context->operation = impl;
+    context->owner = owner;
+    if (FAILED(hr = WindowsDuplicateString( request->scope, &context->scopes ))) goto failed;
+    token_request_get_login_hint( request, &context->login_hint );
+    if ((context->account = account)) IInspectable_AddRef( account );
+    completed_async_AddRef( &impl->IAsyncOperation_IInspectable_iface );
+    if (!(thread = CreateThread( NULL, 0, interactive_token_worker, context, 0, NULL )))
+    {
+        completed_async_Release( &impl->IAsyncOperation_IInspectable_iface );
+        hr = HRESULT_FROM_WIN32( GetLastError() );
+        goto failed;
+    }
+    CloseHandle( thread );
+    hr = IInspectable_QueryInterface( operation, iid, out );
+    IInspectable_Release( operation );
+    return hr;
+
+failed:
+    if (context->account) IInspectable_Release( context->account );
+    WindowsDeleteString( context->scopes );
+    WindowsDeleteString( context->login_hint );
+    free( context );
+    IInspectable_Release( operation );
+    return hr;
 }
 
 struct web_authentication_core_manager_statics;
@@ -2893,6 +3212,40 @@ static HRESULT WINAPI web_manager_statics_GetTrustLevel( struct web_authenticati
         return E_NOTIMPL; \
     }
 
+static ULONGLONG get_unix_time(void)
+{
+    ULARGE_INTEGER value;
+    FILETIME time;
+    GetSystemTimeAsFileTime( &time );
+    value.LowPart = time.dwLowDateTime;
+    value.HighPart = time.dwHighDateTime;
+    return (value.QuadPart - 116444736000000000ULL) / 10000000ULL;
+}
+
+static BOOL prepare_silent_wam_token(void)
+{
+    WCHAR *token = load_wam_token_file( L"C:\\wam-access-token.txt" );
+    WCHAR *expires = load_wam_token_file( L"C:\\wam-token-expires-on.txt" );
+    WCHAR *refresh = NULL;
+    BOOL have_token = token != NULL;
+    ULONGLONG expiry = expires ? wcstoull( expires, NULL, 10 ) : 0;
+    DWORD exit_code;
+
+    if (have_token && (!expiry || expiry > get_unix_time() + 300)) goto done;
+    refresh = load_wam_token_file( L"C:\\wam-refresh-token.txt" );
+    if (refresh && run_wine365_auth( NULL, NULL, FALSE, &exit_code ) && !exit_code)
+    {
+        if (token) { SecureZeroMemory( token, wcslen(token) * sizeof(*token) ); free( token ); }
+        token = load_wam_token_file( L"C:\\wam-access-token.txt" );
+        have_token = token != NULL;
+    }
+done:
+    if (refresh) { SecureZeroMemory( refresh, wcslen(refresh) * sizeof(*refresh) ); free( refresh ); }
+    if (token) { SecureZeroMemory( token, wcslen(token) * sizeof(*token) ); free( token ); }
+    free( expires );
+    return have_token;
+}
+
 static HRESULT WINAPI web_manager_GetTokenSilentlyAsync(
         struct web_authentication_core_manager_statics *iface, IInspectable *request, IInspectable **operation )
 {
@@ -2905,7 +3258,8 @@ static HRESULT WINAPI web_manager_GetTokenSilentlyAsync(
     {
         struct web_token_request *token_request = (struct web_token_request *)request;
         const WCHAR *client_id = WindowsGetStringRawBuffer( token_request->client_id, NULL );
-        INT32 status = !wcsicmp( client_id, L"d3590ed6-52b3-4102-aeff-aad2292ab01c" ) ? 0 : 3;
+        INT32 status = !wcsicmp( client_id, L"d3590ed6-52b3-4102-aeff-aad2292ab01c" ) &&
+                       prepare_silent_wam_token() ? 0 : 3;
         if (FAILED(hr = web_token_request_result_create( status,
                 WindowsGetStringRawBuffer( token_request->scope, NULL ), NULL, &result ))) return hr;
     }
@@ -2923,7 +3277,7 @@ static HRESULT WINAPI web_manager_GetTokenSilentlyWithWebAccountAsync(
     TRACE( "iface %p, request %p, account %p, operation %p.\n", iface, request, account, operation );
     if (!operation) return E_POINTER;
     *operation = NULL;
-    if (FAILED(hr = web_token_request_result_create( 0,
+    if (FAILED(hr = web_token_request_result_create( prepare_silent_wam_token() ? 0 : 3,
             WindowsGetStringRawBuffer( ((struct web_token_request *)request)->scope, NULL ), account,
             &result ))) return hr;
     hr = completed_provider_operation_create( result, operation );
@@ -3081,7 +3435,7 @@ static HRESULT WINAPI web_manager_interop_RequestTokenForWindowAsync(
     TRACE( "iface %p, window %p, request %p, iid %s, operation %p, scope %s, client_id %s.\n", iface,
            window, request, debugstr_guid( iid ), operation, debugstr_hstring( token_request->scope ),
            debugstr_hstring( token_request->client_id ) );
-    return create_interactive_token_operation( 0, token_request, NULL, iid, operation );
+    return create_pending_interactive_token_operation( window, token_request, NULL, iid, operation );
 }
 
 static HRESULT WINAPI web_manager_interop_RequestTokenWithWebAccountForWindowAsync(
@@ -3090,7 +3444,8 @@ static HRESULT WINAPI web_manager_interop_RequestTokenWithWebAccountForWindowAsy
 {
     TRACE( "iface %p, window %p, request %p, account %p, iid %s, operation %p.\n", iface, window,
            request, account, debugstr_guid( iid ), operation );
-    return create_interactive_token_operation( 0, (struct web_token_request *)request, account, iid, operation );
+    return create_pending_interactive_token_operation( window, (struct web_token_request *)request,
+                                                        account, iid, operation );
 }
 
 static const struct web_authentication_core_manager_interop_vtbl web_manager_interop_vtbl =

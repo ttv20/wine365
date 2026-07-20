@@ -1,5 +1,5 @@
 MODULE  = windows.security.authentication.onlineid.dll
-IMPORTS = combase
+IMPORTS = combase crypt32
 
 SOURCES = \
 	authenticator.c \
