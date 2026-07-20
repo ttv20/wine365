@@ -22,9 +22,8 @@ machine, Office edition, account, or Wine prefix.
 
 In the tested installation, Word can:
 
-- install through Office Click-to-Run's Delivery Optimization path and launch
-  after a fresh installation;
-- expose automatic Office updates and complete an **Update Now** check;
+- install Microsoft Office and launch Word after a fresh installation;
+- receive automatic Office updates and install updates with **Update Now**;
 - create, edit, save, close, and reopen DOCX files;
 - use core UI, tables, Shapes, WordArt, comments, Save As, PDF export, and print
   preview;
@@ -56,7 +55,7 @@ Wine365 was produced with AI, so it cannot meet this rule. These changes will
 Wine365 is based on **Wine 11.12**
 ([`996020f410e`](https://gitlab.winehq.org/wine/wine/-/commit/996020f410e7a1aa2dd6b44cf740854ea524d31a))
 with Wine365 compatibility changes through this branch. Relative to that base,
-the branch changes 151 paths with about 15,963 insertions and 715 deletions.
+the branch changes 151 paths with about 15,938 insertions and 691 deletions.
 
 ### Main changes
 
@@ -67,9 +66,9 @@ the branch changes 151 paths with about 15,963 insertions and 715 deletions.
   shape shaders, WIC target reuse, geometry fixes, and GDI+ antialiasing.
 - **Wayland and RTL languages:** popup stacking, caption controls, input regions,
   XKB language reporting, and preferred-UI-language handling.
-- **Installation, updates, and sign-in:** ranged BITS downloads, an
-  Office-compatible Delivery Optimization service, `CoCancelCall`, COM teardown,
-  WinHTTP/WinINet
+- **Installation, updates, and sign-in:** Office Click-to-Run installation and
+  update downloads through ranged BITS and an Office-compatible Delivery
+  Optimization service, plus `CoCancelCall`, COM teardown, WinHTTP/WinINet
   compatibility, WAM/OneAuth objects, and federated MSHTML navigation.
 - **OAuth:** `wine365auth.exe` runs inside the prefix, uses PKCE, handles federated
   returns, and stores WAM state with DPAPI under
