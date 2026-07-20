@@ -3898,30 +3898,30 @@ static void test_client_security(void)
     ok_ole_success(hr, "IUnknown_QueryInterface IID_IClientSecurity");
 
     hr = IClientSecurity_QueryBlanket(pCliSec, (IUnknown *)pProxy, NULL, NULL, NULL, NULL, NULL, NULL, NULL);
-    todo_wine ok_ole_success(hr, "IClientSecurity_QueryBlanket (all NULLs)");
+    ok_ole_success(hr, "IClientSecurity_QueryBlanket (all NULLs)");
 
     hr = IClientSecurity_QueryBlanket(pCliSec, (IUnknown *)pMarshal, NULL, NULL, NULL, NULL, NULL, NULL, NULL);
-    todo_wine ok(hr == E_NOINTERFACE, "IClientSecurity_QueryBlanket with local interface should have returned E_NOINTERFACE instead of 0x%08lx\n", hr);
+    ok(hr == E_NOINTERFACE, "IClientSecurity_QueryBlanket with local interface should have returned E_NOINTERFACE instead of 0x%08lx\n", hr);
 
     hr = IClientSecurity_QueryBlanket(pCliSec, (IUnknown *)pProxy, &dwAuthnSvc, &dwAuthzSvc, &pServerPrincName, &dwAuthnLevel, &dwImpLevel, &pAuthInfo, &dwCapabilities);
-    todo_wine ok_ole_success(hr, "IClientSecurity_QueryBlanket");
+    ok_ole_success(hr, "IClientSecurity_QueryBlanket");
 
     hr = IClientSecurity_SetBlanket(pCliSec, (IUnknown *)pProxy, dwAuthnSvc, dwAuthzSvc, pServerPrincName, dwAuthnLevel, RPC_C_IMP_LEVEL_IMPERSONATE, pAuthInfo, dwCapabilities);
-    todo_wine ok_ole_success(hr, "IClientSecurity_SetBlanket");
+    ok_ole_success(hr, "IClientSecurity_SetBlanket");
 
     hr = IClassFactory_CreateInstance(pProxy, NULL, &IID_IWineTest, &pv);
     ok(hr == E_NOINTERFACE, "COM call should have succeeded instead of returning 0x%08lx\n", hr);
 
     hr = IClientSecurity_SetBlanket(pCliSec, (IUnknown *)pMarshal, dwAuthnSvc, dwAuthzSvc, pServerPrincName, dwAuthnLevel, dwImpLevel, pAuthInfo, dwCapabilities);
-    todo_wine ok(hr == E_NOINTERFACE, "IClientSecurity_SetBlanket with local interface should have returned E_NOINTERFACE instead of 0x%08lx\n", hr);
+    ok(hr == E_NOINTERFACE, "IClientSecurity_SetBlanket with local interface should have returned E_NOINTERFACE instead of 0x%08lx\n", hr);
 
     hr = IClientSecurity_SetBlanket(pCliSec, (IUnknown *)pProxy, 0xdeadbeef, dwAuthzSvc, pServerPrincName, dwAuthnLevel, dwImpLevel, pAuthInfo, dwCapabilities);
-    todo_wine ok(hr == E_INVALIDARG, "IClientSecurity_SetBlanke with invalid dwAuthnSvc should have returned E_INVALIDARG instead of 0x%08lx\n", hr);
+    ok(hr == E_INVALIDARG, "IClientSecurity_SetBlanke with invalid dwAuthnSvc should have returned E_INVALIDARG instead of 0x%08lx\n", hr);
 
     CoTaskMemFree(pServerPrincName);
 
     hr = IClientSecurity_QueryBlanket(pCliSec, pUnknown1, &dwAuthnSvc, &dwAuthzSvc, &pServerPrincName, &dwAuthnLevel, &dwImpLevel, &pAuthInfo, &dwCapabilities);
-    todo_wine ok_ole_success(hr, "IClientSecurity_QueryBlanket(IUnknown)");
+    ok_ole_success(hr, "IClientSecurity_QueryBlanket(IUnknown)");
 
     CoTaskMemFree(pServerPrincName);
 

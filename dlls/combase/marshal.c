@@ -53,6 +53,12 @@ struct ifproxy
     IRpcProxyBuffer *proxy;  /* interface proxy (RO) */
     ULONG refs;              /* imported (public) references (LOCK) */
     IRpcChannelBuffer *chan; /* channel to object (CS parent->cs) */
+    DWORD authn_service;     /* authentication service (CS parent->cs) */
+    DWORD authz_service;     /* authorization service (CS parent->cs) */
+    WCHAR *server_principal; /* server principal name (CS parent->cs) */
+    DWORD authn_level;       /* authentication level (CS parent->cs) */
+    DWORD imp_level;         /* impersonation level (CS parent->cs) */
+    DWORD capabilities;      /* proxy security capabilities (CS parent->cs) */
 };
 
 /* imported object / proxy manager */
@@ -1351,50 +1357,108 @@ static ULONG WINAPI ProxyCliSec_Release(IClientSecurity *iface)
     return IMultiQI_Release(&This->IMultiQI_iface);
 }
 
-static HRESULT WINAPI ProxyCliSec_QueryBlanket(IClientSecurity *iface,
-                                               IUnknown *pProxy,
-                                               DWORD *pAuthnSvc,
-                                               DWORD *pAuthzSvc,
-                                               OLECHAR **ppServerPrincName,
-                                               DWORD *pAuthnLevel,
-                                               DWORD *pImpLevel,
-                                               void **pAuthInfo,
-                                               DWORD *pCapabilities)
+/* Called with manager->cs held. */
+static struct ifproxy *proxy_manager_find_ifproxy_by_iface(struct proxy_manager *manager, IUnknown *proxy)
 {
-    FIXME("(%p, %p, %p, %p, %p, %p, %p, %p): stub\n", pProxy, pAuthnSvc,
-          pAuthzSvc, ppServerPrincName, pAuthnLevel, pImpLevel, pAuthInfo,
-          pCapabilities);
+    struct ifproxy *ifproxy;
 
-    if (pAuthnSvc)
-        *pAuthnSvc = 0;
-    if (pAuthzSvc)
-        *pAuthzSvc = 0;
-    if (ppServerPrincName)
-        *ppServerPrincName = NULL;
-    if (pAuthnLevel)
-        *pAuthnLevel = RPC_C_AUTHN_LEVEL_DEFAULT;
-    if (pImpLevel)
-        *pImpLevel = RPC_C_IMP_LEVEL_DEFAULT;
-    if (pAuthInfo)
-        *pAuthInfo = NULL;
-    if (pCapabilities)
-        *pCapabilities = EOAC_NONE;
+    LIST_FOR_EACH_ENTRY(ifproxy, &manager->interfaces, struct ifproxy, entry)
+        if (ifproxy->iface == proxy || proxy == (IUnknown *)&manager->IMultiQI_iface) return ifproxy;
+    return NULL;
+}
 
-    return E_NOTIMPL;
+static HRESULT WINAPI ProxyCliSec_QueryBlanket(IClientSecurity *iface,
+                                               IUnknown *proxy,
+                                               DWORD *authn_service,
+                                               DWORD *authz_service,
+                                               OLECHAR **server_principal,
+                                               DWORD *authn_level,
+                                               DWORD *imp_level,
+                                               void **auth_info,
+                                               DWORD *capabilities)
+{
+    struct proxy_manager *manager = impl_from_IClientSecurity(iface);
+    struct ifproxy *ifproxy;
+    WCHAR *principal = NULL;
+    HRESULT hr = S_OK;
+
+    TRACE("%p, %p, %p, %p, %p, %p, %p, %p.\n", proxy, authn_service, authz_service,
+          server_principal, authn_level, imp_level, auth_info, capabilities);
+
+    if (!proxy) return E_INVALIDARG;
+
+    EnterCriticalSection(&manager->cs);
+    if (!(ifproxy = proxy_manager_find_ifproxy_by_iface(manager, proxy)))
+        hr = E_NOINTERFACE;
+    else if (server_principal && ifproxy->server_principal)
+    {
+        SIZE_T size = (wcslen(ifproxy->server_principal) + 1) * sizeof(WCHAR);
+        if ((principal = CoTaskMemAlloc(size))) memcpy(principal, ifproxy->server_principal, size);
+        else hr = E_OUTOFMEMORY;
+    }
+
+    if (SUCCEEDED(hr))
+    {
+        if (authn_service) *authn_service = ifproxy->authn_service;
+        if (authz_service) *authz_service = ifproxy->authz_service;
+        if (server_principal) *server_principal = principal;
+        if (authn_level) *authn_level = ifproxy->authn_level;
+        if (imp_level) *imp_level = ifproxy->imp_level;
+        if (auth_info) *auth_info = NULL;
+        if (capabilities) *capabilities = ifproxy->capabilities;
+    }
+    LeaveCriticalSection(&manager->cs);
+    return hr;
 }
 
 static HRESULT WINAPI ProxyCliSec_SetBlanket(IClientSecurity *iface,
-                                             IUnknown *pProxy, DWORD AuthnSvc,
-                                             DWORD AuthzSvc,
-                                             OLECHAR *pServerPrincName,
-                                             DWORD AuthnLevel, DWORD ImpLevel,
-                                             void *pAuthInfo,
-                                             DWORD Capabilities)
+                                             IUnknown *proxy, DWORD authn_service,
+                                             DWORD authz_service,
+                                             OLECHAR *server_principal,
+                                             DWORD authn_level, DWORD imp_level,
+                                             void *auth_info,
+                                             DWORD capabilities)
 {
-    FIXME("%p, %ld, %ld, %s, %ld, %ld, %p, %#lx: stub\n", pProxy, AuthnSvc, AuthzSvc,
-          pServerPrincName == COLE_DEFAULT_PRINCIPAL ? "<default principal>" : debugstr_w(pServerPrincName),
-          AuthnLevel, ImpLevel, pAuthInfo, Capabilities);
-    return E_NOTIMPL;
+    struct proxy_manager *manager = impl_from_IClientSecurity(iface);
+    struct ifproxy *ifproxy;
+    WCHAR *principal = NULL;
+    HRESULT hr = S_OK;
+
+    TRACE("%p, %lu, %lu, %s, %lu, %lu, %p, %#lx.\n", proxy, authn_service, authz_service,
+          server_principal == COLE_DEFAULT_PRINCIPAL ? "<default principal>" : debugstr_w(server_principal),
+          authn_level, imp_level, auth_info, capabilities);
+
+    if (!proxy) return E_INVALIDARG;
+    if ((authn_service != RPC_C_AUTHN_DEFAULT && authn_service > 0xffff) ||
+        (authz_service != RPC_C_AUTHZ_DEFAULT && authz_service > RPC_C_AUTHZ_DCE) ||
+        (authn_level != RPC_C_AUTHN_LEVEL_DEFAULT && authn_level > RPC_C_AUTHN_LEVEL_PKT_PRIVACY) ||
+        (imp_level != RPC_C_IMP_LEVEL_DEFAULT &&
+         (imp_level < RPC_C_IMP_LEVEL_ANONYMOUS || imp_level > RPC_C_IMP_LEVEL_DELEGATE)))
+        return E_INVALIDARG;
+
+    if (server_principal && server_principal != COLE_DEFAULT_PRINCIPAL &&
+        !(principal = wcsdup(server_principal)))
+        return E_OUTOFMEMORY;
+
+    EnterCriticalSection(&manager->cs);
+    if (!(ifproxy = proxy_manager_find_ifproxy_by_iface(manager, proxy)))
+    {
+        hr = E_NOINTERFACE;
+    }
+    else
+    {
+        ifproxy->authn_service = authn_service;
+        ifproxy->authz_service = authz_service;
+        free(ifproxy->server_principal);
+        ifproxy->server_principal = principal;
+        principal = NULL;
+        ifproxy->authn_level = authn_level;
+        ifproxy->imp_level = imp_level;
+        ifproxy->capabilities = capabilities;
+    }
+    LeaveCriticalSection(&manager->cs);
+    free(principal);
+    return hr;
 }
 
 static HRESULT WINAPI ProxyCliSec_CopyProxy(IClientSecurity *iface,
@@ -1524,6 +1588,7 @@ static void ifproxy_destroy(struct ifproxy * This)
 
     if (This->proxy) IRpcProxyBuffer_Release(This->proxy);
 
+    free(This->server_principal);
     free(This);
 }
 
@@ -1721,6 +1786,13 @@ static HRESULT proxy_manager_create_ifproxy(
     ifproxy->iid = *riid;
     ifproxy->refs = 0;
     ifproxy->proxy = NULL;
+    ifproxy->authn_service = RPC_C_AUTHN_NONE;
+    ifproxy->authz_service = RPC_C_AUTHZ_NONE;
+    ifproxy->server_principal = NULL;
+    ifproxy->authn_level = This->oxid_info.dwAuthnHint <= RPC_C_AUTHN_LEVEL_PKT_PRIVACY ?
+                           This->oxid_info.dwAuthnHint : RPC_C_AUTHN_LEVEL_NONE;
+    ifproxy->imp_level = RPC_C_IMP_LEVEL_IDENTIFY;
+    ifproxy->capabilities = EOAC_NONE;
 
     assert(channel);
     ifproxy->chan = channel; /* FIXME: we should take the binding strings and construct the channel in this function */
