@@ -26,6 +26,7 @@
 #include "wine/debug.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(qmgr);
+WINE_DECLARE_DEBUG_CHANNEL(deliveryopt);
 
 BOOL transitionJobState(BackgroundCopyJobImpl *job, BG_JOB_STATE from, BG_JOB_STATE to)
 {
@@ -212,6 +213,16 @@ static inline BackgroundCopyJobImpl *impl_from_IBackgroundCopyJob4(IBackgroundCo
     return CONTAINING_RECORD(iface, BackgroundCopyJobImpl, IBackgroundCopyJob4_iface);
 }
 
+static inline BackgroundCopyJobImpl *impl_from_IDeliveryOptimizationJob(IDeliveryOptimizationJob *iface)
+{
+    return CONTAINING_RECORD(iface, BackgroundCopyJobImpl, IDeliveryOptimizationJob_iface);
+}
+
+static inline BackgroundCopyJobImpl *impl_from_IDeliveryOptimizationJob2(IDeliveryOptimizationJob2 *iface)
+{
+    return CONTAINING_RECORD(iface, BackgroundCopyJobImpl, IDeliveryOptimizationJob2_iface);
+}
+
 static HRESULT WINAPI BackgroundCopyJob_QueryInterface(IBackgroundCopyJob4 *iface, REFIID riid, void **obj)
 {
     BackgroundCopyJobImpl *job = impl_from_IBackgroundCopyJob4(iface);
@@ -229,6 +240,14 @@ static HRESULT WINAPI BackgroundCopyJob_QueryInterface(IBackgroundCopyJob4 *ifac
     else if (IsEqualGUID(riid, &IID_IBackgroundCopyJobHttpOptions))
     {
         *obj = &job->IBackgroundCopyJobHttpOptions_iface;
+    }
+    else if (job->delivery_optimization && IsEqualGUID(riid, &IID_IDeliveryOptimizationJob))
+    {
+        *obj = &job->IDeliveryOptimizationJob_iface;
+    }
+    else if (job->delivery_optimization && IsEqualGUID(riid, &IID_IDeliveryOptimizationJob2))
+    {
+        *obj = &job->IDeliveryOptimizationJob2_iface;
     }
     else
     {
@@ -347,6 +366,30 @@ static HRESULT WINAPI BackgroundCopyJob_Resume(IBackgroundCopyJob4 *iface)
 
     TRACE("%p.\n", iface);
 
+    if (job->delivery_optimization)
+    {
+        BackgroundCopyFileImpl *file;
+        HRESULT sink_hr = S_OK;
+
+        EnterCriticalSection(&job->cs);
+        if (list_empty(&job->files)) sink_hr = DO_E_JOB_EMPTY;
+        LIST_FOR_EACH_ENTRY(file, &job->files, BackgroundCopyFileImpl, entryFromJob)
+        {
+            if ((!file->info.LocalName || !file->info.LocalName[0]) && !file->download_sink)
+            {
+                sink_hr = DO_E_FILE_DOWNLOADSINK_UNSPECIFIED;
+                break;
+            }
+            if (file->integrity_check_mandatory && !file->integrity_check_info)
+            {
+                sink_hr = DO_E_INTEGRITYCHECKINFO_UNSPECIFIED;
+                break;
+            }
+        }
+        LeaveCriticalSection(&job->cs);
+        if (FAILED(sink_hr)) return sink_hr;
+    }
+
     EnterCriticalSection(&globalMgr.cs);
     if (is_job_done(job))
     {
@@ -408,7 +451,7 @@ static HRESULT WINAPI BackgroundCopyJob_Cancel(IBackgroundCopyJob4 *iface)
                 WARN("Couldn't delete %s (%lu)\n", debugstr_w(file->tempFileName), GetLastError());
                 hr = BG_S_UNABLE_TO_DELETE_FILES;
             }
-            if (file->info.LocalName && !DeleteFileW(file->info.LocalName))
+            if (file->info.LocalName && file->info.LocalName[0] && !DeleteFileW(file->info.LocalName))
             {
                 WARN("Couldn't delete %s (%lu)\n", debugstr_w(file->info.LocalName), GetLastError());
                 hr = BG_S_UNABLE_TO_DELETE_FILES;
@@ -439,21 +482,24 @@ static HRESULT WINAPI BackgroundCopyJob_Complete(IBackgroundCopyJob4 *iface)
         BackgroundCopyFileImpl *file;
         LIST_FOR_EACH_ENTRY(file, &job->files, BackgroundCopyFileImpl, entryFromJob)
         {
-            if (file->fileProgress.Completed)
+            if (!file->fileProgress.Completed)
             {
-                if (!MoveFileExW(file->tempFileName, file->info.LocalName,
-                                 (MOVEFILE_COPY_ALLOWED
-                                  | MOVEFILE_REPLACE_EXISTING
-                                  | MOVEFILE_WRITE_THROUGH)))
-                {
-                    ERR("Couldn't rename file %s -> %s\n",
-                        debugstr_w(file->tempFileName),
-                        debugstr_w(file->info.LocalName));
-                    hr = BG_S_PARTIAL_COMPLETE;
-                }
-            }
-            else
                 hr = BG_S_PARTIAL_COMPLETE;
+            }
+            else if (file->download_sink)
+            {
+                HRESULT commit_hr = IStream_Commit(file->download_sink, STGC_DEFAULT);
+                if (FAILED(commit_hr) && commit_hr != E_NOTIMPL) hr = BG_S_PARTIAL_COMPLETE;
+            }
+            else if (!file->info.LocalName || !file->info.LocalName[0] ||
+                     !MoveFileExW(file->tempFileName, file->info.LocalName,
+                                  MOVEFILE_COPY_ALLOWED | MOVEFILE_REPLACE_EXISTING |
+                                  MOVEFILE_WRITE_THROUGH))
+            {
+                ERR("Couldn't rename file %s -> %s\n", debugstr_w(file->tempFileName),
+                    debugstr_w(file->info.LocalName));
+                hr = BG_S_PARTIAL_COMPLETE;
+            }
         }
     }
 
@@ -1028,6 +1074,185 @@ static const IBackgroundCopyJob4Vtbl BackgroundCopyJobVtbl =
     BackgroundCopyJob_GetMaximumDownloadTime,
 };
 
+static HRESULT map_delivery_optimization_error(HRESULT hr)
+{
+    switch (hr)
+    {
+    case BG_E_INVALID_STATE: return DO_E_INVALID_STATE;
+    case BG_E_INVALID_RANGE: return DO_E_INVALID_RANGE;
+    case BG_E_OVERLAPPING_RANGES: return DO_E_OVERLAPPING_RANGES;
+    case BG_E_INSUFFICIENT_RANGE_SUPPORT: return DO_E_INSUFFICIENT_RANGE_SUPPORT;
+    default: return hr;
+    }
+}
+
+static HRESULT add_delivery_optimization_file(BackgroundCopyJobImpl *job, const WCHAR *file_id,
+                                              const WCHAR *remote_url, const WCHAR *local_name,
+                                              DWORD range_count, const BG_FILE_RANGE *ranges,
+                                              UINT64 file_size, BackgroundCopyFileImpl **ret_file)
+{
+    BackgroundCopyFileImpl *file;
+    UINT64 bytes_total;
+    HRESULT hr;
+
+    if (!file_id || !file_id[0] || !remote_url || !remote_url[0] ||
+        (range_count && !ranges) || (!range_count && ranges))
+        return E_INVALIDARG;
+    if (job->type != BG_JOB_TYPE_DOWNLOAD || is_job_done(job)) return DO_E_INVALID_STATE;
+
+    if (FAILED(hr = BackgroundCopyFileConstructor(job, remote_url, local_name ? local_name : L"", &file)))
+        return hr;
+    if (!(file->file_id = wcsdup(file_id)))
+    {
+        IBackgroundCopyFile2_Release(&file->IBackgroundCopyFile2_iface);
+        return E_OUTOFMEMORY;
+    }
+
+    file->source_size = file_size;
+    if (range_count)
+    {
+        hr = BackgroundCopyFileSetRanges(file, range_count, ranges, file_size);
+        if (FAILED(hr))
+        {
+            IBackgroundCopyFile2_Release(&file->IBackgroundCopyFile2_iface);
+            return map_delivery_optimization_error(hr);
+        }
+    }
+    else
+    {
+        file->fileProgress.BytesTotal = file_size;
+    }
+
+    bytes_total = file->fileProgress.BytesTotal;
+    EnterCriticalSection(&job->cs);
+    list_add_head(&job->files, &file->entryFromJob);
+    if (job->jobProgress.BytesTotal != BG_SIZE_UNKNOWN && bytes_total != BG_SIZE_UNKNOWN)
+        job->jobProgress.BytesTotal += bytes_total;
+    else
+        job->jobProgress.BytesTotal = BG_SIZE_UNKNOWN;
+    ++job->jobProgress.FilesTotal;
+    LeaveCriticalSection(&job->cs);
+
+    if (ret_file) *ret_file = file;
+    return S_OK;
+}
+
+static HRESULT WINAPI delivery_job_QueryInterface(IDeliveryOptimizationJob *iface, REFIID riid, void **obj)
+{
+    BackgroundCopyJobImpl *job = impl_from_IDeliveryOptimizationJob(iface);
+    return IBackgroundCopyJob4_QueryInterface(&job->IBackgroundCopyJob4_iface, riid, obj);
+}
+
+static ULONG WINAPI delivery_job_AddRef(IDeliveryOptimizationJob *iface)
+{
+    BackgroundCopyJobImpl *job = impl_from_IDeliveryOptimizationJob(iface);
+    return IBackgroundCopyJob4_AddRef(&job->IBackgroundCopyJob4_iface);
+}
+
+static ULONG WINAPI delivery_job_Release(IDeliveryOptimizationJob *iface)
+{
+    BackgroundCopyJobImpl *job = impl_from_IDeliveryOptimizationJob(iface);
+    return IBackgroundCopyJob4_Release(&job->IBackgroundCopyJob4_iface);
+}
+
+static HRESULT WINAPI delivery_job_AddFileWithRanges(IDeliveryOptimizationJob *iface, const WCHAR *file_id,
+                                                      const WCHAR *remote_url, const WCHAR *local_name,
+                                                      DWORD range_count, BG_FILE_RANGE *ranges,
+                                                      UINT64 file_size)
+{
+    BackgroundCopyJobImpl *job = impl_from_IDeliveryOptimizationJob(iface);
+
+    TRACE_(deliveryopt)("%p, %s, %s, %s, %lu, %p, %s.\n", job, debugstr_w(file_id),
+                        debugstr_w(remote_url), debugstr_w(local_name), range_count, ranges,
+                        wine_dbgstr_longlong(file_size));
+
+    return add_delivery_optimization_file(job, file_id, remote_url, local_name, range_count, ranges,
+                                          file_size, NULL);
+}
+
+static const IDeliveryOptimizationJobVtbl delivery_job_vtbl =
+{
+    delivery_job_QueryInterface,
+    delivery_job_AddRef,
+    delivery_job_Release,
+    delivery_job_AddFileWithRanges,
+};
+
+static HRESULT WINAPI delivery_job2_QueryInterface(IDeliveryOptimizationJob2 *iface, REFIID riid, void **obj)
+{
+    BackgroundCopyJobImpl *job = impl_from_IDeliveryOptimizationJob2(iface);
+    return IBackgroundCopyJob4_QueryInterface(&job->IBackgroundCopyJob4_iface, riid, obj);
+}
+
+static ULONG WINAPI delivery_job2_AddRef(IDeliveryOptimizationJob2 *iface)
+{
+    BackgroundCopyJobImpl *job = impl_from_IDeliveryOptimizationJob2(iface);
+    return IBackgroundCopyJob4_AddRef(&job->IBackgroundCopyJob4_iface);
+}
+
+static ULONG WINAPI delivery_job2_Release(IDeliveryOptimizationJob2 *iface)
+{
+    BackgroundCopyJobImpl *job = impl_from_IDeliveryOptimizationJob2(iface);
+    return IBackgroundCopyJob4_Release(&job->IBackgroundCopyJob4_iface);
+}
+
+static HRESULT WINAPI delivery_job2_AddFile(IDeliveryOptimizationJob2 *iface, const WCHAR *file_id,
+                                             const WCHAR *remote_url, DWORD range_count,
+                                             BG_FILE_RANGE *ranges, REFIID riid, void **obj)
+{
+    BackgroundCopyJobImpl *job = impl_from_IDeliveryOptimizationJob2(iface);
+    BackgroundCopyFileImpl *file;
+    HRESULT hr;
+
+    TRACE_(deliveryopt)("%p, %s, %s, %lu, %p, %s, %p.\n", job, debugstr_w(file_id),
+                        debugstr_w(remote_url), range_count, ranges, debugstr_guid(riid), obj);
+
+    if (!obj || !riid) return E_INVALIDARG;
+    *obj = NULL;
+    if (FAILED(hr = add_delivery_optimization_file(job, file_id, remote_url, NULL, range_count,
+                                                   ranges, DO_UNKNOWN_FILE_SIZE, &file)))
+        return hr;
+    return IBackgroundCopyFile2_QueryInterface(&file->IBackgroundCopyFile2_iface, riid, obj);
+}
+
+static HRESULT WINAPI delivery_job2_GetProperty(IDeliveryOptimizationJob2 *iface,
+                                                 DOJobPropertyId prop_id, VARIANT *value)
+{
+    BackgroundCopyJobImpl *job = impl_from_IDeliveryOptimizationJob2(iface);
+    WCHAR buffer[64];
+
+    TRACE_(deliveryopt)("%p, %u, %p.\n", job, prop_id, value);
+
+    if (!value) return E_INVALIDARG;
+    VariantInit(value);
+    if (prop_id != DOJobPropertyId_ExtendedErrorInfo) return DO_E_UNKNOWN_PROPERTY_ID;
+
+    swprintf(buffer, ARRAY_SIZE(buffer), L"{\"HResult\":\"0x%08lx\"}", job->error.code);
+    V_VT(value) = VT_BSTR;
+    if (!(V_BSTR(value) = SysAllocString(buffer))) return E_OUTOFMEMORY;
+    return S_OK;
+}
+
+static HRESULT WINAPI delivery_job2_SetProperty(IDeliveryOptimizationJob2 *iface,
+                                                 DOJobPropertyId prop_id, const VARIANT *value)
+{
+    BackgroundCopyJobImpl *job = impl_from_IDeliveryOptimizationJob2(iface);
+
+    TRACE_(deliveryopt)("%p, %u, %p.\n", job, prop_id, value);
+    return prop_id == DOJobPropertyId_ExtendedErrorInfo ? DO_E_READ_ONLY_PROPERTY :
+                                                         DO_E_UNKNOWN_PROPERTY_ID;
+}
+
+static const IDeliveryOptimizationJob2Vtbl delivery_job2_vtbl =
+{
+    delivery_job2_QueryInterface,
+    delivery_job2_AddRef,
+    delivery_job2_Release,
+    delivery_job2_AddFile,
+    delivery_job2_GetProperty,
+    delivery_job2_SetProperty,
+};
+
 static inline BackgroundCopyJobImpl *impl_from_IBackgroundCopyJobHttpOptions(
     IBackgroundCopyJobHttpOptions *iface)
 {
@@ -1193,12 +1418,14 @@ static const IBackgroundCopyJobHttpOptionsVtbl http_options_vtbl =
     http_options_GetSecurityFlags
 };
 
-HRESULT BackgroundCopyJobConstructor(LPCWSTR displayName, BG_JOB_TYPE type, GUID *job_id, BackgroundCopyJobImpl **job)
+HRESULT BackgroundCopyJobConstructor(LPCWSTR displayName, BG_JOB_TYPE type, BOOL delivery_optimization,
+                                     GUID *job_id, BackgroundCopyJobImpl **job)
 {
     HRESULT hr;
     BackgroundCopyJobImpl *This;
 
-    TRACE("(%s,%d,%p)\n", debugstr_w(displayName), type, job);
+    TRACE("(%s, %d, delivery optimization %u, %p)\n", debugstr_w(displayName), type,
+          delivery_optimization, job);
 
     This = malloc(sizeof(*This));
     if (!This)
@@ -1206,11 +1433,14 @@ HRESULT BackgroundCopyJobConstructor(LPCWSTR displayName, BG_JOB_TYPE type, GUID
 
     This->IBackgroundCopyJob4_iface.lpVtbl = &BackgroundCopyJobVtbl;
     This->IBackgroundCopyJobHttpOptions_iface.lpVtbl = &http_options_vtbl;
+    This->IDeliveryOptimizationJob_iface.lpVtbl = &delivery_job_vtbl;
+    This->IDeliveryOptimizationJob2_iface.lpVtbl = &delivery_job2_vtbl;
     InitializeCriticalSectionEx(&This->cs, 0, RTL_CRITICAL_SECTION_FLAG_FORCE_DEBUG_INFO);
     This->cs.DebugInfo->Spare[0] = (DWORD_PTR)(__FILE__ ": BackgroundCopyJobImpl.cs");
 
     This->ref = 1;
     This->type = type;
+    This->delivery_optimization = delivery_optimization;
 
     This->displayName = wcsdup(displayName);
     if (!This->displayName)

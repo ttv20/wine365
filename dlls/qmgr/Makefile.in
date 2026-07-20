@@ -1,9 +1,10 @@
 MODULE    = qmgr.dll
-IMPORTS   = uuid winhttp ole32 advapi32
+IMPORTS   = uuid winhttp oleaut32 ole32 rpcrt4 advapi32
 
 EXTRADLLFLAGS = -Wb,--prefer-native
 
 SOURCES = \
+	deliveryoptimization_proxy.idl \
 	enum_files.c \
 	enum_jobs.c \
 	factory.c \
@@ -13,3 +14,5 @@ SOURCES = \
 	qmgr_local.idl \
 	rsrc.rc \
 	service.c
+
+dlldata_EXTRADEFS = -DWINE_REGISTER_DLL -DPROXY_CLSID=CLSID_PSFactoryBuffer

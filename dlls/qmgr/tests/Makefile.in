@@ -1,7 +1,8 @@
 TESTDLL   = qmgr.dll
-IMPORTS   = uuid ole32 shlwapi user32
+IMPORTS   = uuid oleaut32 ole32 shlwapi user32
 
 SOURCES = \
+	delivery_optimization.c \
 	enum_files.c \
 	enum_jobs.c \
 	file.c \

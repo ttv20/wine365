@@ -24,6 +24,12 @@
 WINE_DEFAULT_DEBUG_CHANNEL(qmgr);
 
 BackgroundCopyManagerImpl globalMgr;
+static IBackgroundCopyManager delivery_optimization_manager;
+
+static BOOL is_delivery_optimization_manager(IBackgroundCopyManager *iface)
+{
+    return iface == &delivery_optimization_manager;
+}
 
 static HRESULT WINAPI BackgroundCopyManager_QueryInterface(IBackgroundCopyManager *iface,
         REFIID riid, void **ppv)
@@ -61,7 +67,7 @@ static HRESULT WINAPI BackgroundCopyManager_CreateJob(IBackgroundCopyManager *if
 
     TRACE("(%s %d %p %p)\n", debugstr_w(DisplayName), Type, pJobId, ppJob);
 
-    hres = BackgroundCopyJobConstructor(DisplayName, Type, pJobId, &job);
+    hres = BackgroundCopyJobConstructor(DisplayName, Type, is_delivery_optimization_manager(iface), pJobId, &job);
     if (FAILED(hres))
         return hres;
 
@@ -91,7 +97,8 @@ static HRESULT WINAPI BackgroundCopyManager_GetJob(IBackgroundCopyManager *iface
 
     LIST_FOR_EACH_ENTRY(cur, &qmgr->jobs, BackgroundCopyJobImpl, entryFromQmgr)
     {
-        if (IsEqualGUID(&cur->jobId, jobID))
+        if (cur->delivery_optimization == is_delivery_optimization_manager(iface) &&
+            IsEqualGUID(&cur->jobId, jobID))
         {
             *job = (IBackgroundCopyJob *)&cur->IBackgroundCopyJob4_iface;
             IBackgroundCopyJob_AddRef(*job);
@@ -137,11 +144,13 @@ BackgroundCopyManagerImpl globalMgr = {
     LIST_INIT(globalMgr.jobs)
 };
 
+static IBackgroundCopyManager delivery_optimization_manager = { &BackgroundCopyManagerVtbl };
+
 /* Constructor for instances of background copy manager */
-HRESULT BackgroundCopyManagerConstructor(LPVOID *ppObj)
+HRESULT BackgroundCopyManagerConstructor(BOOL delivery_optimization, void **obj)
 {
-    TRACE("(%p)\n", ppObj);
-    *ppObj = &globalMgr;
+    TRACE("delivery optimization %u, obj %p\n", delivery_optimization, obj);
+    *obj = delivery_optimization ? (void *)&delivery_optimization_manager : (void *)&globalMgr.IBackgroundCopyManager_iface;
     return S_OK;
 }
 

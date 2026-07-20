@@ -28,6 +28,7 @@
 #include "bits2_0.h"
 #include "bits2_5.h"
 #include "bits3_0.h"
+#include "deliveryoptimization.h"
 
 #include <string.h>
 #include "wine/list.h"
@@ -37,7 +38,10 @@ typedef struct
 {
     IBackgroundCopyJob4 IBackgroundCopyJob4_iface;
     IBackgroundCopyJobHttpOptions IBackgroundCopyJobHttpOptions_iface;
+    IDeliveryOptimizationJob IDeliveryOptimizationJob_iface;
+    IDeliveryOptimizationJob2 IDeliveryOptimizationJob2_iface;
     LONG ref;
+    BOOL delivery_optimization;
     LPWSTR displayName;
     LPWSTR description;
     BG_JOB_TYPE type;
@@ -72,8 +76,20 @@ typedef struct
 typedef struct
 {
     IBackgroundCopyFile2 IBackgroundCopyFile2_iface;
+    IDeliveryOptimizationFile IDeliveryOptimizationFile_iface;
+    IDeliveryOptimizationFile2 IDeliveryOptimizationFile2_iface;
     LONG ref;
     BG_FILE_INFO info;
+    WCHAR *file_id;
+    WCHAR *decryption_info;
+    WCHAR *integrity_check_info;
+    BOOL integrity_check_mandatory;
+    BOOL integrity_check_mandatory_set;
+    IStream *download_sink;
+    UINT64 source_size;
+    UINT http_connection_count;
+    ULONGLONG transfer_start;
+    ULONGLONG transfer_end;
     BG_FILE_PROGRESS fileProgress;
     WCHAR tempFileName[MAX_PATH];
     struct list entryFromJob;
@@ -96,20 +112,24 @@ typedef struct
 typedef struct
 {
     IClassFactory IClassFactory_iface;
+    BOOL delivery_optimization;
 } ClassFactoryImpl;
 
 extern HANDLE stop_event;
 extern ClassFactoryImpl BITS_ClassFactory;
+extern ClassFactoryImpl DO_ClassFactory;
 extern BackgroundCopyManagerImpl globalMgr;
 
-HRESULT BackgroundCopyManagerConstructor(LPVOID *ppObj);
-HRESULT BackgroundCopyJobConstructor(LPCWSTR displayName, BG_JOB_TYPE type,
-                                     GUID *pJobId, BackgroundCopyJobImpl **job);
+HRESULT BackgroundCopyManagerConstructor(BOOL delivery_optimization, LPVOID *obj);
+HRESULT BackgroundCopyJobConstructor(LPCWSTR displayName, BG_JOB_TYPE type, BOOL delivery_optimization,
+                                     GUID *job_id, BackgroundCopyJobImpl **job);
 HRESULT enum_copy_job_create(BackgroundCopyManagerImpl *qmgr,
         IEnumBackgroundCopyJobs **enumjob);
 HRESULT BackgroundCopyFileConstructor(BackgroundCopyJobImpl *owner,
                                       LPCWSTR remoteName, LPCWSTR localName,
                                       BackgroundCopyFileImpl **file);
+HRESULT BackgroundCopyFileSetRanges(BackgroundCopyFileImpl *file, DWORD count,
+                                    const BG_FILE_RANGE *ranges, UINT64 file_size);
 HRESULT EnumBackgroundCopyFilesConstructor(BackgroundCopyJobImpl*, IEnumBackgroundCopyFiles**);
 DWORD WINAPI fileTransfer(void *param);
 void processJob(BackgroundCopyJobImpl *job);

@@ -22,6 +22,12 @@
 #include "wine/debug.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(qmgr);
+WINE_DECLARE_DEBUG_CHANNEL(deliveryopt);
+
+static inline ClassFactoryImpl *impl_from_IClassFactory(IClassFactory *iface)
+{
+    return CONTAINING_RECORD(iface, ClassFactoryImpl, IClassFactory_iface);
+}
 
 static ULONG WINAPI
 BITS_IClassFactory_AddRef(IClassFactory *iface)
@@ -34,7 +40,7 @@ BITS_IClassFactory_QueryInterface(IClassFactory *iface, REFIID riid, void **ppvO
 {
     if (IsEqualGUID(riid, &IID_IUnknown) || IsEqualGUID(riid, &IID_IClassFactory))
     {
-        *ppvObj = &BITS_ClassFactory.IClassFactory_iface;
+        *ppvObj = iface;
         return S_OK;
     }
 
@@ -52,15 +58,19 @@ static HRESULT WINAPI
 BITS_IClassFactory_CreateInstance(IClassFactory *iface, IUnknown *pUnkOuter, REFIID riid,
                                   void **ppvObj)
 {
+    ClassFactoryImpl *factory = impl_from_IClassFactory(iface);
     HRESULT res;
     IUnknown *punk = NULL;
 
-    TRACE("IID: %s\n", debugstr_guid(riid));
+    if (factory->delivery_optimization)
+        TRACE_(deliveryopt)("creating manager, IID %s\n", debugstr_guid(riid));
+    else
+        TRACE("IID %s\n", debugstr_guid(riid));
 
     if (pUnkOuter)
         return CLASS_E_NOAGGREGATION;
 
-    res = BackgroundCopyManagerConstructor((LPVOID*) &punk);
+    res = BackgroundCopyManagerConstructor(factory->delivery_optimization, (void **)&punk);
     if (FAILED(res))
         return res;
 
@@ -87,5 +97,12 @@ static const IClassFactoryVtbl BITS_IClassFactory_Vtbl =
 
 ClassFactoryImpl BITS_ClassFactory =
 {
-    { &BITS_IClassFactory_Vtbl }
+    { &BITS_IClassFactory_Vtbl },
+    FALSE
+};
+
+ClassFactoryImpl DO_ClassFactory =
+{
+    { &BITS_IClassFactory_Vtbl },
+    TRUE
 };

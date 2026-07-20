@@ -77,7 +77,7 @@ static BOOL
 StartCount(void)
 {
     HRESULT hr;
-    DWORD dwReg;
+    DWORD bits_reg, do_reg;
 
     TRACE("\n");
 
@@ -92,10 +92,18 @@ StartCount(void)
         return FALSE;
 
     hr = CoRegisterClassObject(&CLSID_BackgroundCopyManager,
-                               (IUnknown *) &BITS_ClassFactory.IClassFactory_iface,
-                               CLSCTX_LOCAL_SERVER, REGCLS_MULTIPLEUSE, &dwReg);
+                               (IUnknown *)&BITS_ClassFactory.IClassFactory_iface,
+                               CLSCTX_LOCAL_SERVER, REGCLS_MULTIPLEUSE, &bits_reg);
+    if (FAILED(hr)) return FALSE;
+
+    hr = CoRegisterClassObject(&CLSID_DeliveryOptimization,
+                               (IUnknown *)&DO_ClassFactory.IClassFactory_iface,
+                               CLSCTX_LOCAL_SERVER, REGCLS_MULTIPLEUSE, &do_reg);
     if (FAILED(hr))
+    {
+        CoRevokeClassObject(bits_reg);
         return FALSE;
+    }
 
     return TRUE;
 }
