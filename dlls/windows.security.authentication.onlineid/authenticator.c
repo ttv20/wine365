@@ -2777,12 +2777,12 @@ static BOOL run_wine365_auth( HWND owner, HSTRING login_hint, BOOL interactive, 
     {
         if (hint_path[0])
             swprintf( command, ARRAY_SIZE(command),
-                      L"\"C:\\wine365auth.exe\" --owner 0x%Ix --login-hint-file \"%s\"",
+                      L"\"C:\\windows\\system32\\wine365auth.exe\" --owner 0x%Ix --login-hint-file \"%s\"",
                       (ULONG_PTR)owner, hint_path );
         else
-            swprintf( command, ARRAY_SIZE(command), L"\"C:\\wine365auth.exe\" --owner 0x%Ix", (ULONG_PTR)owner );
+            swprintf( command, ARRAY_SIZE(command), L"\"C:\\windows\\system32\\wine365auth.exe\" --owner 0x%Ix", (ULONG_PTR)owner );
     }
-    else lstrcpyW( command, L"\"C:\\wine365auth.exe\" --refresh" );
+    else lstrcpyW( command, L"\"C:\\windows\\system32\\wine365auth.exe\" --refresh" );
 
     ret = CreateProcessW( NULL, command, NULL, NULL, FALSE, 0, NULL, NULL, &startup, &process );
     if (!ret)
