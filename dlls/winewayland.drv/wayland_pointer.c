@@ -269,13 +269,62 @@ static void pointer_handle_button(void *data, struct wl_pointer *wl_pointer,
     NtUserSendHardwareInput(hwnd, 0, &input, 0);
 }
 
+static void pointer_handle_axis_value120(void *data, struct wl_pointer *wl_pointer,
+                                         uint32_t axis, int32_t value120);
+
+static void pointer_send_continuous_axis(uint32_t axis, double value)
+{
+    struct wayland_pointer *pointer = &process_wayland.pointer;
+    double scaled;
+    int value120;
+
+    /* Weston and other wlroots-style compositors use 10 surface units for one
+     * wheel detent when neither axis_discrete nor axis_value120 is available. */
+    scaled = value * WHEEL_DELTA / 10.0;
+    if (axis == WL_POINTER_AXIS_VERTICAL_SCROLL) scaled = -scaled;
+    scaled += pointer->axis_remainder[axis];
+    value120 = lround(scaled);
+    pointer->axis_remainder[axis] = scaled - value120;
+    if (value120) pointer_handle_axis_value120(NULL, NULL, axis, value120);
+}
+
 static void pointer_handle_axis(void *data, struct wl_pointer *wl_pointer,
                                 uint32_t time, uint32_t axis, wl_fixed_t value)
 {
+    struct wayland_pointer *pointer = &process_wayland.pointer;
+
+    if (axis > WL_POINTER_AXIS_HORIZONTAL_SCROLL) return;
+
+    pointer->axis_value[axis] += wl_fixed_to_double(value);
+    pointer->axis_pending |= 1u << axis;
+
+    /* wl_pointer.frame was added in version 5. On older versions no discrete
+     * event can follow, so dispatch the continuous value immediately. */
+    if (wl_proxy_get_version((struct wl_proxy *)wl_pointer) < WL_POINTER_FRAME_SINCE_VERSION)
+    {
+        pointer_send_continuous_axis(axis, pointer->axis_value[axis]);
+        pointer->axis_value[axis] = 0.0;
+        pointer->axis_pending &= ~(1u << axis);
+    }
 }
 
 static void pointer_handle_frame(void *data, struct wl_pointer *wl_pointer)
 {
+    struct wayland_pointer *pointer = &process_wayland.pointer;
+    uint32_t axis;
+
+    for (axis = WL_POINTER_AXIS_VERTICAL_SCROLL;
+         axis <= WL_POINTER_AXIS_HORIZONTAL_SCROLL; axis++)
+    {
+        unsigned int mask = 1u << axis;
+
+        if ((pointer->axis_pending & mask) && !(pointer->axis_value120 & mask))
+            pointer_send_continuous_axis(axis, pointer->axis_value[axis]);
+        pointer->axis_value[axis] = 0.0;
+    }
+
+    pointer->axis_pending = 0;
+    pointer->axis_value120 = 0;
 }
 
 static void pointer_handle_axis_source(void *data, struct wl_pointer *wl_pointer,
@@ -291,9 +340,12 @@ static void pointer_handle_axis_stop(void *data, struct wl_pointer *wl_pointer,
 static void pointer_handle_axis_value120(void *data, struct wl_pointer *wl_pointer,
                                          uint32_t axis, int32_t value120)
 {
+    struct wayland_pointer *pointer = &process_wayland.pointer;
     INPUT input = {0};
     HWND hwnd;
 
+    if (axis > WL_POINTER_AXIS_HORIZONTAL_SCROLL) return;
+    pointer->axis_value120 |= 1u << axis;
     if (!(hwnd = wayland_pointer_get_focused_hwnd())) return;
 
     input.type = INPUT_MOUSE;

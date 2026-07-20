@@ -119,6 +119,10 @@ struct wayland_pointer
     struct wayland_cursor cursor;
     double accum_x;
     double accum_y;
+    double axis_value[2];
+    double axis_remainder[2];
+    unsigned int axis_pending;
+    unsigned int axis_value120;
     pthread_mutex_t mutex;
 };
 
