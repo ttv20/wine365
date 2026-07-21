@@ -141,6 +141,7 @@ typedef struct
 {
     cxx_frame_info frame_info;
     BOOL rethrow;
+    BOOL registered;
     EXCEPTION_RECORD *prev_rec;
 } cxx_catch_ctx;
 
@@ -200,7 +201,10 @@ static LONG CALLBACK cxx_rethrow_filter(PEXCEPTION_POINTERS eptrs, void *c)
     if (rec->ExceptionCode != CXX_EXCEPTION)
         return EXCEPTION_CONTINUE_SEARCH;
     if (!rec->ExceptionInformation[1] && !rec->ExceptionInformation[2])
+    {
+        ctx->rethrow = TRUE;
         return EXCEPTION_EXECUTE_HANDLER;
+    }
     if (rec->ExceptionInformation[1] == ctx->prev_rec->ExceptionInformation[1])
         ctx->rethrow = TRUE;
     return EXCEPTION_CONTINUE_SEARCH;
@@ -209,7 +213,12 @@ static LONG CALLBACK cxx_rethrow_filter(PEXCEPTION_POINTERS eptrs, void *c)
 static void CALLBACK cxx_catch_cleanup(BOOL normal, void *c)
 {
     cxx_catch_ctx *ctx = c;
-    __CxxUnregisterExceptionObject(&ctx->frame_info, ctx->rethrow);
+
+    if (ctx->registered)
+    {
+        ctx->registered = FALSE;
+        __CxxUnregisterExceptionObject(&ctx->frame_info, ctx->rethrow);
+    }
 }
 
 static void* WINAPI call_catch_block(EXCEPTION_RECORD *rec)
@@ -225,8 +234,10 @@ static void* WINAPI call_catch_block(EXCEPTION_RECORD *rec)
     void *ret_addr = NULL;
 
     ctx.rethrow = FALSE;
+    ctx.registered = FALSE;
     ctx.prev_rec = prev_rec;
     __CxxRegisterExceptionObject(&ep, &ctx.frame_info);
+    ctx.registered = TRUE;
     msvcrt_get_thread_data()->processing_throw--;
     __TRY
     {
