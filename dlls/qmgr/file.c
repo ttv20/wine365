@@ -720,7 +720,7 @@ static BOOL write_download_data(BackgroundCopyFileImpl *file, HANDLE output, con
 }
 
 #define HTTP_READ_BUFFER_SIZE (64 * 1024)
-#define HTTP_RANGE_WORKER_COUNT 4
+#define HTTP_RANGE_WORKER_COUNT 8
 
 struct parallel_range_context
 {
