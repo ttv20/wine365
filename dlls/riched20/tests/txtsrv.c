@@ -106,6 +106,8 @@ DEFINE_EXPECT(ITextHostImpl_TxViewChange);
 DEFINE_EXPECT(ITextHostImpl_TxScrollWindowEx);
 DEFINE_EXPECT(ITextHostImpl_TxGetClientRect);
 
+static BOOL return_null_char_format;
+
 typedef struct ITextHostTestImpl
 {
     ITextHost ITextHost_iface;
@@ -340,7 +342,7 @@ static HRESULT __thiscall ITextHostImpl_TxGetCharFormat(ITextHost *iface, const 
 {
     ITextHostTestImpl *This = impl_from_ITextHost(iface);
     TRACECALL("Call to TxGetCharFormat(%p, ppCF=%p)\n", This, ppCF);
-    *ppCF = (CHARFORMATW *)&This->char_format;
+    *ppCF = return_null_char_format ? NULL : (CHARFORMATW *)&This->char_format;
     return S_OK;
 }
 
@@ -1116,6 +1118,20 @@ static void test_QueryInterface(void)
     ITextHost_Release(host);
 }
 
+static void test_null_default_format(void)
+{
+    ITextServices *txtserv;
+    ITextHost *host;
+
+    return_null_char_format = TRUE;
+    if (init_texthost(&txtserv, &host))
+    {
+        ITextServices_Release(txtserv);
+        ITextHost_Release(host);
+    }
+    return_null_char_format = FALSE;
+}
+
 static void test_default_format(void)
 {
     ITextServices *txtserv;
@@ -1484,6 +1500,7 @@ START_TEST( txtsrv )
         test_TxGetNaturalSize();
         test_TxDraw();
         test_QueryInterface();
+        test_null_default_format();
         test_default_format();
         test_TxGetScroll();
         test_notifications();

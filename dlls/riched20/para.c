@@ -192,12 +192,13 @@ void ME_MakeFirstParagraph(ME_TextEditor *editor, HDC hdc)
   style = ME_MakeStyle(&cf);
   text->pDefaultStyle = style;
 
-  if (ITextHost_TxGetCharFormat(editor->texthost, &host_cf) == S_OK)
+  host_cf = NULL;
+  if (ITextHost_TxGetCharFormat(editor->texthost, &host_cf) == S_OK && host_cf)
   {
     ZeroMemory(&cf, sizeof(cf));
     cf.cbSize = sizeof(cf);
-    cfany_to_cf2w(&cf, (CHARFORMAT2W *)host_cf);
-    ME_SetDefaultCharFormat(editor, &cf);
+    if (cfany_to_cf2w(&cf, (CHARFORMAT2W *)host_cf))
+      ME_SetDefaultCharFormat(editor, &cf);
   }
 
   eol_len = editor->bEmulateVersion10 ? 2 : 1;
