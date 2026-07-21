@@ -1407,6 +1407,97 @@ UINT WINAPI MsiEnumClientsExW( const WCHAR *component, const WCHAR *usersid, DWO
     return ERROR_ACCESS_DENIED;
 }
 
+static LSTATUS open_office_c2r_key( const WCHAR *path, HKEY *key )
+{
+    LSTATUS ret;
+
+    ret = RegOpenKeyExW( HKEY_LOCAL_MACHINE, path, 0, KEY_READ | KEY_WOW64_64KEY, key );
+    if (ret) ret = RegOpenKeyExW( HKEY_LOCAL_MACHINE, path, 0, KEY_READ | KEY_WOW64_32KEY, key );
+    return ret;
+}
+
+/* Office Click-to-Run's App-V integration exposes installed MSOINTL languages
+ * as MSI qualified components on Windows.  The generated integration MSI does
+ * not publish these entries under Wine, so recover them from C2R's own product
+ * registry when the real qualified-component registration is absent. */
+static UINT enum_office_c2r_ui_qualifiers( const WCHAR *component, DWORD index, awstring *qual_buf,
+                                           DWORD *qual_size, awstring *app_buf, DWORD *app_size )
+{
+    static const WCHAR msointl_component[] = L"{27E507A1-383D-4951-90D0-0D023EE7CFA1}";
+    static const WCHAR releases_path[] = L"Software\\Microsoft\\Office\\ClickToRun\\ProductReleaseIDs";
+    static const WCHAR config_path[] = L"Software\\Microsoft\\Office\\ClickToRun\\Configuration";
+    struct ui_culture
+    {
+        WCHAR name[LOCALE_NAME_MAX_LENGTH];
+        LCID lcid;
+    } cultures[64];
+    WCHAR release[GUID_SIZE], path[512], culture[LOCALE_NAME_MAX_LENGTH + 4];
+    WCHAR platform[8] = L"x64", client_culture[LOCALE_NAME_MAX_LENGTH] = L"", qualifier[32], *suffix;
+    DWORD release_index, culture_index, release_len, culture_len, size, count = 0, i;
+    HKEY releases, release_cultures, config;
+    LSTATUS status;
+    UINT ret, app_ret;
+
+    if (wcsicmp( component, msointl_component )) return ERROR_UNKNOWN_COMPONENT;
+    if (open_office_c2r_key( releases_path, &releases )) return ERROR_UNKNOWN_COMPONENT;
+
+    for (release_index = 0; count < ARRAY_SIZE(cultures); release_index++)
+    {
+        release_len = ARRAY_SIZE(release);
+        status = RegEnumKeyExW( releases, release_index, release, &release_len, NULL, NULL, NULL, NULL );
+        if (status == ERROR_NO_MORE_ITEMS) break;
+        if (status) continue;
+        swprintf( path, ARRAY_SIZE(path), L"%s\\%s\\culture", releases_path, release );
+        if (open_office_c2r_key( path, &release_cultures )) continue;
+
+        for (culture_index = 0; count < ARRAY_SIZE(cultures); culture_index++)
+        {
+            culture_len = ARRAY_SIZE(culture);
+            status = RegEnumKeyExW( release_cultures, culture_index, culture, &culture_len,
+                                    NULL, NULL, NULL, NULL );
+            if (status == ERROR_NO_MORE_ITEMS) break;
+            if (status) continue;
+            if (!(suffix = wcsrchr( culture, '.' )) || wcscmp( suffix, L".16" )) continue;
+            *suffix = 0;
+            if (!(cultures[count].lcid = LocaleNameToLCID( culture, LOCALE_ALLOW_NEUTRAL_NAMES ))) continue;
+            for (i = 0; i < count; i++) if (!wcsicmp( cultures[i].name, culture )) break;
+            if (i != count) continue;
+            lstrcpyW( cultures[count++].name, culture );
+        }
+        RegCloseKey( release_cultures );
+    }
+    RegCloseKey( releases );
+
+    if (!open_office_c2r_key( config_path, &config ))
+    {
+        size = sizeof(platform);
+        RegGetValueW( config, NULL, L"Platform", RRF_RT_REG_SZ, NULL, platform, &size );
+        size = sizeof(client_culture);
+        RegGetValueW( config, NULL, L"ClientCulture", RRF_RT_REG_SZ, NULL, client_culture, &size );
+        RegCloseKey( config );
+    }
+    if (wcsicmp( platform, L"x64" ) && wcsicmp( platform, L"x86" )) lstrcpyW( platform, L"x64" );
+    for (i = 0; i < count; i++)
+    {
+        if (!wcsicmp( cultures[i].name, client_culture ))
+        {
+            struct ui_culture first = cultures[0];
+            cultures[0] = cultures[i];
+            cultures[i] = first;
+            break;
+        }
+    }
+
+    if (index >= count) return count ? ERROR_NO_MORE_ITEMS : ERROR_UNKNOWN_COMPONENT;
+    swprintf( qualifier, ARRAY_SIZE(qualifier), L"%s\\%lu", platform, cultures[index].lcid );
+
+    TRACE( "providing Office C2R qualifier %s for culture %s\n",
+           debugstr_w(qualifier), debugstr_w(cultures[index].name) );
+    ret = msi_strcpy_to_awstring( qualifier, -1, qual_buf, qual_size );
+    app_ret = msi_strcpy_to_awstring( L"", -1, app_buf, app_size );
+    return app_ret == ERROR_SUCCESS ? ret : app_ret;
+}
+
 static UINT MSI_EnumComponentQualifiers( const WCHAR *szComponent, DWORD iIndex, awstring *lpQualBuf,
                                          DWORD *pcchQual, awstring *lpAppBuf, DWORD *pcchAppBuf )
 {
@@ -1422,7 +1513,7 @@ static UINT MSI_EnumComponentQualifiers( const WCHAR *szComponent, DWORD iIndex,
 
     r = MSIREG_OpenUserComponentsKey( szComponent, &key, FALSE );
     if (r != ERROR_SUCCESS)
-        return ERROR_UNKNOWN_COMPONENT;
+        return enum_office_c2r_ui_qualifiers( szComponent, iIndex, lpQualBuf, pcchQual, lpAppBuf, pcchAppBuf );
 
     /* figure out how big the name is we want to return */
     name_max = 0x10;
