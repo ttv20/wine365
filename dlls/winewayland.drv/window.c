@@ -188,13 +188,15 @@ void wayland_win_data_restack_owned_popups(HWND toplevel)
     }
     if (!popup_found) return;
 
-    /* Then put every owner GPU surface immediately above the owner. Since the
-     * popups were positioned first, these clients stay below the popup group. */
+    /* Then rebuild the GPU client hierarchy above the owner. Since the popups
+     * were positioned first, these clients stay below the popup group while
+     * child GPU surfaces remain above their attached HWND ancestors. */
     RB_FOR_EACH_ENTRY(data, &win_data_rb, struct wayland_win_data, entry)
     {
         client = data->client_surface;
         if (!client || !client->wl_subsurface || client->toplevel != toplevel) continue;
-        wl_subsurface_place_above(client->wl_subsurface, toplevel_surface->wl_surface);
+        wl_subsurface_place_above(client->wl_subsurface,
+                                  wayland_client_surface_get_parent(toplevel_surface, client));
     }
 
     /* Subsurface stacking state is applied by committing the parent. */
@@ -554,7 +556,8 @@ void WAYLAND_WindowPosChanged(HWND hwnd, HWND insert_after, HWND owner_hint, UIN
 {
     HWND owner = NtUserGetAncestor(hwnd, GA_ROOT);
     HWND transient_owner = NtUserGetWindowRelative(hwnd, GW_OWNER);
-    HWND adjacent_owner;
+    HWND active_owner, adjacent_owner;
+    DWORD process_id, active_process_id;
     struct wayland_surface *owner_surface, *transient_parent_surface;
     struct wayland_win_data *data, *owner_data, *transient_owner_data;
     BOOL managed, fullscreen = swp_flags & WINE_SWP_FULLSCREEN;
@@ -575,6 +578,27 @@ void WAYLAND_WindowPosChanged(HWND hwnd, HWND insert_after, HWND owner_hint, UIN
             (width <= 16 || height <= 16) &&
             (adjacent_owner = find_adjacent_window(hwnd, &new_rects->window)))
             owner = adjacent_owner;
+    }
+
+    /* Some applications keep a hidden toplevel as the Win32 owner of modal
+     * popups. Don't attach a visible popup to that role-less Wayland surface,
+     * since the popup would remain unmapped with its hidden parent. Use the
+     * visible active root from the same process as the effective owner. */
+    if (!managed && owner && owner != hwnd && !NtUserIsWindowVisible(owner))
+    {
+        active_owner = get_active_window();
+        if (active_owner) active_owner = NtUserGetAncestor(active_owner, GA_ROOT);
+        if (!active_owner || active_owner == hwnd || !NtUserIsWindowVisible(active_owner))
+            active_owner = find_adjacent_window(hwnd, &new_rects->window);
+
+        if (active_owner)
+        {
+            NtUserGetWindowThread(hwnd, &process_id);
+            NtUserGetWindowThread(active_owner, &active_process_id);
+            if (active_owner != hwnd && NtUserIsWindowVisible(active_owner) &&
+                process_id == active_process_id)
+                owner = active_owner;
+        }
     }
     if (transient_owner) transient_owner = NtUserGetAncestor(transient_owner, GA_ROOT);
 

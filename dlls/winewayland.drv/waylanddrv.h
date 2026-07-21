@@ -347,6 +347,8 @@ void wayland_client_surface_attach(struct wayland_client_surface *client, HWND t
                                    const RECT *client_rect);
 void wayland_client_surface_get_rect(struct wayland_client_surface *client, HWND toplevel,
                                      RECT *client_rect);
+struct wl_surface *wayland_client_surface_get_parent(struct wayland_surface *surface,
+                                                     struct wayland_client_surface *client);
 void wayland_surface_ensure_contents(struct wayland_surface *surface);
 void wayland_surface_set_title(struct wayland_surface *surface, LPCWSTR title);
 void wayland_surface_assign_icon(struct wayland_surface *surface);

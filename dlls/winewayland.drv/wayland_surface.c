@@ -701,8 +701,8 @@ static void wayland_surface_reconfigure_size(struct wayland_surface *surface,
         wp_viewport_set_destination(surface->wp_viewport, -1, -1);
 }
 
-static struct wl_surface *wayland_client_surface_get_parent(struct wayland_surface *surface,
-                                                             struct wayland_client_surface *client)
+struct wl_surface *wayland_client_surface_get_parent(struct wayland_surface *surface,
+                                                     struct wayland_client_surface *client)
 {
     HWND parent = NtUserGetAncestor(client->client.hwnd, GA_PARENT);
 
