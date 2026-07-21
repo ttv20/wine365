@@ -701,6 +701,24 @@ static void wayland_surface_reconfigure_size(struct wayland_surface *surface,
         wp_viewport_set_destination(surface->wp_viewport, -1, -1);
 }
 
+static struct wl_surface *wayland_client_surface_get_parent(struct wayland_surface *surface,
+                                                             struct wayland_client_surface *client)
+{
+    HWND parent = NtUserGetAncestor(client->client.hwnd, GA_PARENT);
+
+    while (parent && parent != client->toplevel && parent != NtUserGetDesktopWindow())
+    {
+        struct wayland_win_data *data = wayland_win_data_get_nolock(parent);
+
+        if (data && data->client_surface && data->client_surface->wl_subsurface &&
+            data->client_surface->toplevel == client->toplevel)
+            return data->client_surface->wl_surface;
+        parent = NtUserGetAncestor(parent, GA_PARENT);
+    }
+
+    return surface->wl_surface;
+}
+
 /**********************************************************************
  *          wayland_surface_reconfigure_client
  *
@@ -708,7 +726,8 @@ static void wayland_surface_reconfigure_size(struct wayland_surface *surface,
  */
 static void wayland_surface_reconfigure_client(struct wayland_surface *surface,
                                                struct wayland_client_surface *client,
-                                               const RECT *client_rect)
+                                               const RECT *client_rect,
+                                               BOOL restack)
 {
     struct wayland_window_config *window = &surface->window;
     RECT rect = *client_rect;
@@ -723,7 +742,14 @@ static void wayland_surface_reconfigure_client(struct wayland_surface *surface,
     if (client->wl_subsurface)
     {
         wl_subsurface_set_position(client->wl_subsurface, rect.left, rect.top);
-        wl_subsurface_place_above(client->wl_subsurface, surface->wl_surface);
+        /* Repositioning an existing subsurface relative to the parent would
+         * reorder overlapping GPU siblings on every present. On initial
+         * attachment, place a child GPU surface above the nearest attached
+         * ancestor surface so the result doesn't depend on sibling creation
+         * order. */
+        if (restack)
+            wl_subsurface_place_above(client->wl_subsurface,
+                                      wayland_client_surface_get_parent(surface, client));
     }
 
     if (rect.left != rect.right && rect.top != rect.bottom)
@@ -1302,6 +1328,7 @@ void wayland_client_surface_attach(struct wayland_client_surface *client, HWND t
 {
     struct wayland_win_data *toplevel_data;
     struct wayland_surface *surface;
+    BOOL new_subsurface = FALSE;
     HWND hwnd = client->client.hwnd;
 
     TRACE("client %p hwnd %p old toplevel %p new toplevel %p subsurface %p\n",
@@ -1342,9 +1369,10 @@ void wayland_client_surface_attach(struct wayland_client_surface *client, HWND t
         wl_subsurface_set_desync(client->wl_subsurface);
 
         client->toplevel = toplevel;
+        new_subsurface = TRUE;
     }
 
-    wayland_surface_reconfigure_client(surface, client, client_rect);
+    wayland_surface_reconfigure_client(surface, client, client_rect, new_subsurface);
     wayland_win_data_restack_owned_popups(toplevel);
     /* Recommit the client surface in case destroying its previous subsurface
      * role unmapped an existing EGL buffer. Then apply the new subsurface
