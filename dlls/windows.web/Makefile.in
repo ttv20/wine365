@@ -4,7 +4,9 @@ IMPORTS = combase
 SOURCES = \
 	app_capability.c \
 	classes.idl \
+	http_client.c \
 	json_array.c \
 	json_object.c \
 	json_value.c \
-	main.c
+	main.c \
+	protocol_filter.c

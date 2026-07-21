@@ -23,6 +23,7 @@
 
 import "windows.data.json.idl";
 import "windows.security.authorization.appcapabilityaccess.idl";
+import "windows.web.http.idl";
 
 namespace Windows.Data.Json {
     runtimeclass JsonArray;
@@ -32,4 +33,12 @@ namespace Windows.Data.Json {
 
 namespace Windows.Security.Authorization.AppCapabilityAccess {
     runtimeclass AppCapability;
+}
+
+namespace Windows.Web.Http {
+    runtimeclass HttpClient;
+}
+
+namespace Windows.Web.Http.Filters {
+    runtimeclass HttpBaseProtocolFilter;
 }
