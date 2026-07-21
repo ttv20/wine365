@@ -491,6 +491,7 @@ struct effect_impl
     const GUID *vertex_buffer;
     const GUID *vertex_shader;
     const GUID *pixel_shader;
+    BOOL draw_info_set;
 };
 
 static void queue_d3d1x_test(void (*test)(BOOL d3d11), BOOL d3d11)
@@ -16305,12 +16306,15 @@ static HRESULT STDMETHODCALLTYPE ps_effect_impl_Initialize(ID2D1EffectImpl *ifac
         ID2D1EffectContext *context, ID2D1TransformGraph *graph)
 {
     struct effect_impl *effect_impl = impl_from_ID2D1EffectImpl(iface);
+    HRESULT hr;
 
     effect_impl->effect_context = context;
     ID2D1EffectContext_AddRef(effect_impl->effect_context);
 
-    return ID2D1TransformGraph_SetSingleTransformNode(graph,
+    hr = ID2D1TransformGraph_SetSingleTransformNode(graph,
             (ID2D1TransformNode *)&effect_impl->ID2D1DrawTransform_iface);
+    ok(FAILED(hr) || effect_impl->draw_info_set, "Draw info was not set during graph setup.\n");
+    return hr;
 }
 
 static const ID2D1EffectImplVtbl custom_effect_impl_vtbl =
@@ -16389,6 +16393,7 @@ static HRESULT STDMETHODCALLTYPE effect_impl_draw_transform_SetDrawInfo(ID2D1Dra
     check_interface(info, &IID_IUnknown, TRUE);
     check_interface(info, &IID_ID2D1RenderInfo, TRUE);
     check_interface(info, &IID_ID2D1EffectContext, FALSE);
+    effect_impl->draw_info_set = TRUE;
 
     refcount = get_refcount(info);
     ok(refcount == 1, "Unexpected refcount %lu.\n", refcount);

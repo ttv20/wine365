@@ -694,6 +694,8 @@ static inline struct d2d_transform_graph *impl_from_ID2D1TransformGraph(ID2D1Tra
     return CONTAINING_RECORD(iface, struct d2d_transform_graph, ID2D1TransformGraph_iface);
 }
 
+static HRESULT d2d_effect_transform_node_initialize(struct d2d_transform_node *node);
+
 static HRESULT STDMETHODCALLTYPE d2d_transform_graph_QueryInterface(ID2D1TransformGraph *iface, REFIID iid, void **out)
 {
     TRACE("iface %p, iid %s, out %p.\n", iface, debugstr_guid(iid), out);
@@ -773,20 +775,26 @@ static HRESULT STDMETHODCALLTYPE d2d_transform_graph_SetSingleTransformNode(ID2D
         graph->inputs[i].index = i;
     }
 
-    return S_OK;
+    return d2d_effect_transform_node_initialize(node);
 }
 
 static HRESULT STDMETHODCALLTYPE d2d_transform_graph_AddNode(ID2D1TransformGraph *iface,
         ID2D1TransformNode *object)
 {
     struct d2d_transform_graph *graph = impl_from_ID2D1TransformGraph(iface);
+    struct d2d_transform_node *node;
+    HRESULT hr;
 
     TRACE("iface %p, object %p.\n", iface, object);
 
     if (d2d_transform_graph_get_node(graph, object))
         return E_INVALIDARG;
 
-    return d2d_transform_graph_add_node(graph, object);
+    if (FAILED(hr = d2d_transform_graph_add_node(graph, object)))
+        return hr;
+
+    node = d2d_transform_graph_get_node(graph, object);
+    return d2d_effect_transform_node_initialize(node);
 }
 
 static HRESULT STDMETHODCALLTYPE d2d_transform_graph_RemoveNode(ID2D1TransformGraph *iface,
@@ -3382,36 +3390,46 @@ static bool d2d_transform_node_needs_render_info(const struct d2d_transform_node
     return false;
 }
 
-static HRESULT d2d_effect_transform_graph_initialize_nodes(struct d2d_transform_graph *graph)
+static HRESULT d2d_effect_transform_node_initialize(struct d2d_transform_node *node)
 {
     ID2D1DrawTransform *draw_transform;
+    HRESULT hr;
+
+    if (node->render_info || !d2d_transform_node_needs_render_info(node))
+        return S_OK;
+
+    if (FAILED(hr = d2d_effect_render_info_create(&node->render_info)))
+        return hr;
+
+    if (SUCCEEDED(ID2D1TransformNode_QueryInterface(node->object, &IID_ID2D1DrawTransform,
+            (void **)&draw_transform)))
+    {
+        hr = ID2D1DrawTransform_SetDrawInfo(draw_transform, &node->render_info->ID2D1DrawInfo_iface);
+        ID2D1DrawTransform_Release(draw_transform);
+        if (FAILED(hr))
+        {
+            WARN("Failed to set draw info, hr %#lx.\n", hr);
+            return hr;
+        }
+    }
+    else
+    {
+        FIXME("Unsupported node %p.\n", node);
+        return E_NOTIMPL;
+    }
+
+    return S_OK;
+}
+
+static HRESULT d2d_effect_transform_graph_initialize_nodes(struct d2d_transform_graph *graph)
+{
     struct d2d_transform_node *node;
     HRESULT hr;
 
     LIST_FOR_EACH_ENTRY(node, &graph->nodes, struct d2d_transform_node, entry)
     {
-        if (d2d_transform_node_needs_render_info(node))
-        {
-            if (FAILED(hr = d2d_effect_render_info_create(&node->render_info)))
-                return hr;
-        }
-
-        if (SUCCEEDED(ID2D1TransformNode_QueryInterface(node->object, &IID_ID2D1DrawTransform,
-                (void **)&draw_transform)))
-        {
-            hr = ID2D1DrawTransform_SetDrawInfo(draw_transform, &node->render_info->ID2D1DrawInfo_iface);
-            ID2D1DrawTransform_Release(draw_transform);
-            if (FAILED(hr))
-            {
-                WARN("Failed to set draw info, hr %#lx.\n", hr);
-                return hr;
-            }
-        }
-        else
-        {
-            FIXME("Unsupported node %p.\n", node);
-            return E_NOTIMPL;
-        }
+        if (FAILED(hr = d2d_effect_transform_node_initialize(node)))
+            return hr;
     }
 
     return S_OK;
