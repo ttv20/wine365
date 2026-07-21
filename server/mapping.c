@@ -86,7 +86,7 @@ static const struct object_ops ranges_ops =
     ranges_destroy             /* destroy */
 };
 
-/* file backing the shared sections of a PE image mapping */
+/* page-aligned file backing PE image sections that cannot be mapped directly */
 struct shared_map
 {
     struct object   obj;             /* object header */
@@ -362,15 +362,15 @@ static int check_current_dir_for_exec(void)
     return (ret != MAP_FAILED);
 }
 
-/* create a temp file for anonymous mappings */
-static int create_temp_file( file_pos_t size )
+/* create a temp file for anonymous or page-cache-backed mappings */
+static int create_temp_file( file_pos_t size, int use_memfd )
 {
     static int temp_dir_fd = -1;
     char tmpfn[16];
     int fd;
 
 #if defined(HAVE_MEMFD_CREATE) && defined(MFD_EXEC)
-    if ((fd = memfd_create( "wine-mapping", MFD_EXEC )) != -1)
+    if (use_memfd && (fd = memfd_create( "wine-mapping", MFD_EXEC )) != -1)
     {
         if (grow_file( fd, size )) return fd;
         close( fd );
@@ -627,7 +627,15 @@ static int find_committed_range( struct memory_view *view, file_pos_t start, mem
     return 0;
 }
 
-/* allocate and fill the temp file for a shared PE image mapping */
+/* Allocate and fill a page-layout backing file for PE image sections.
+ *
+ * PE files commonly align raw section data to 512 bytes while mapping the
+ * corresponding virtual sections at page boundaries.  Unix mmap() cannot map
+ * such offsets directly, which otherwise makes the client copy every section
+ * into private anonymous memory.  Keep one server-cached file laid out by
+ * section VirtualAddress so clients can use private file mappings and only
+ * copy pages that the loader actually modifies.
+ */
 static int build_shared_mapping( struct mapping *mapping, size_t align_mask, int fd,
                                  IMAGE_SECTION_HEADER *sec, unsigned int nb_sec )
 {
@@ -635,47 +643,46 @@ static int build_shared_mapping( struct mapping *mapping, size_t align_mask, int
     struct file *file;
     unsigned int i;
     mem_size_t total_size;
-    size_t file_size, map_size, max_size;
-    off_t shared_pos, read_pos, write_pos;
+    size_t file_size, map_size, max_size = 0;
+    off_t read_pos, write_pos;
     char *buffer = NULL;
-    int shared_fd;
+    int shared_fd, needs_backing = 0;
     long toread;
 
-    /* compute the total size of the shared mapping */
+    if (mapping->image.image_flags & IMAGE_FLAGS_ImageMappedFlat) return 1;
 
-    total_size = max_size = 0;
+    total_size = mapping->image.map_size;
     for (i = 0; i < nb_sec; i++)
     {
+        get_section_sizes( &sec[i], align_mask, &map_size, &read_pos, &file_size );
         if ((sec[i].Characteristics & IMAGE_SCN_MEM_SHARED) &&
             (sec[i].Characteristics & IMAGE_SCN_MEM_WRITE))
-        {
-            get_section_sizes( &sec[i], align_mask, &map_size, &read_pos, &file_size );
-            if (file_size > max_size) max_size = file_size;
-            total_size += map_size;
-        }
+            needs_backing = 1;
+        if (sec[i].PointerToRawData && file_size && (read_pos & host_page_mask))
+            needs_backing = 1;
+        if (file_size > max_size) max_size = file_size;
     }
-    if (!total_size) return 1;  /* nothing to do */
+    if (!needs_backing) return 1;
 
     if ((mapping->shared = get_shared_file( mapping->fd ))) return 1;
 
-    /* create a temp file for the mapping */
-
-    if ((shared_fd = create_temp_file( total_size )) == -1) return 0;
+    /* A real temporary file keeps untouched image pages reclaimable.  A memfd
+     * is shmem and would turn the complete reconstructed image into dirty RAM. */
+    if ((shared_fd = create_temp_file( total_size, 0 )) == -1) return 0;
     if (!(file = create_file_for_fd( shared_fd, FILE_GENERIC_READ|FILE_GENERIC_WRITE, 0 ))) return 0;
 
-    if (!(buffer = malloc( max_size ))) goto error;
+    if (max_size && !(buffer = malloc( max_size ))) goto error;
 
-    /* copy the shared sections data into the temp file */
-
-    shared_pos = 0;
     for (i = 0; i < nb_sec; i++)
     {
-        if (!(sec[i].Characteristics & IMAGE_SCN_MEM_SHARED)) continue;
-        if (!(sec[i].Characteristics & IMAGE_SCN_MEM_WRITE)) continue;
         get_section_sizes( &sec[i], align_mask, &map_size, &read_pos, &file_size );
-        write_pos = shared_pos;
-        shared_pos += map_size;
+        if (!((sec[i].Characteristics & IMAGE_SCN_MEM_SHARED) &&
+              (sec[i].Characteristics & IMAGE_SCN_MEM_WRITE)) &&
+            !(read_pos & host_page_mask))
+            continue;
+        write_pos = sec[i].VirtualAddress;
         if (!sec[i].PointerToRawData || !file_size) continue;
+        if (write_pos > total_size || file_size > total_size - write_pos) goto error;
         toread = file_size;
         while (toread)
         {
@@ -1203,7 +1210,7 @@ static struct mapping *create_mapping( struct object *root, const struct unicode
         }
         if ((flags & SEC_RESERVE) && !(mapping->committed = create_ranges())) goto error;
         mapping->size = round_size( mapping->size, page_mask );
-        if ((unix_fd = create_temp_file( mapping->size )) == -1) goto error;
+        if ((unix_fd = create_temp_file( mapping->size, 1 )) == -1) goto error;
         if (!(mapping->fd = create_anonymous_fd( &mapping_fd_ops, unix_fd, &mapping->obj,
                                                  FILE_SYNCHRONOUS_IO_NONALERT ))) goto error;
         allow_fd_caching( mapping->fd );
