@@ -38,9 +38,13 @@ python3 fonts/generate_tahoma_hebrew.py \
 
 Expected output SHA-256:
 
-- `tahoma.ttf`: `09d29233e0e39f8c185e0f68b6e5973b43f69703624419177639dc35af480985`
-- `tahomabd.ttf`: `de6d07a8c299a137b7b3d293f82e900d234727d0126a0e0fecda6d3df870604c`
+- `tahoma.ttf`: `5065097ee3ce8f966702a93c6c447321dc0398517482990c3b70a18169f6e764`
+- `tahomabd.ttf`: `b99f6ba00a5e9d9843f6cedbeb983cac9f229fb768efe5d69c780e80004027f4`
 
 The generator restores Tahoma's original embedded-bitmap and VDMX tables after
-fontTools merges the outline and layout tables.  This preserves legacy UI
-rendering while the appended Hebrew glyphs remain outline-only.
+fontTools merges the outline and layout tables.  The `gasp` ranges request
+smoothing at every size (`GASP_DOGRAY`) and retain grid fitting above 8 ppem.
+Consequently, normal smoothed UI text uses Tahoma outlines instead of the
+monochrome 8–16 ppem strikes, while applications that explicitly request
+non-antialiased text can still use the preserved bitmap data.  The appended
+Hebrew glyphs remain outline-only.
