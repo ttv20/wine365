@@ -719,6 +719,366 @@ static BOOL write_download_data(BackgroundCopyFileImpl *file, HANDLE output, con
     return WriteFile(output, buffer, size, &written, NULL) && written == size;
 }
 
+#define HTTP_READ_BUFFER_SIZE (64 * 1024)
+#define HTTP_RANGE_WORKER_COUNT 4
+
+struct parallel_range_context
+{
+    BackgroundCopyFileImpl *file;
+    URL_COMPONENTSW *url;
+    HANDLE output;
+    CRITICAL_SECTION output_cs;
+    UINT64 *output_offsets;
+    UINT64 remote_size;
+    DWORD flags;
+    LONG next_range;
+    LONG completed_ranges;
+    LONG failed;
+};
+
+struct parallel_http_operation
+{
+    struct parallel_range_context *context;
+    HANDLE event;
+    HRESULT error;
+    DWORD read_size;
+};
+
+static BOOL parallel_transfer_stopped(struct parallel_range_context *context)
+{
+    BackgroundCopyJobImpl *job = context->file->owner;
+    BOOL stopped;
+
+    if (InterlockedCompareExchange(&context->failed, 0, 0)) return TRUE;
+    EnterCriticalSection(&job->cs);
+    stopped = job->state == BG_JOB_STATE_CANCELLED;
+    LeaveCriticalSection(&job->cs);
+    return stopped;
+}
+
+static void set_parallel_range_error(struct parallel_range_context *context, HRESULT hr,
+                                     BG_ERROR_CONTEXT error_context)
+{
+    BackgroundCopyJobImpl *job = context->file->owner;
+
+    if (InterlockedCompareExchange(&context->failed, 1, 0)) return;
+    set_file_error(context->file, hr, error_context);
+    if (!transitionJobState(job, BG_JOB_STATE_CONNECTING, BG_JOB_STATE_ERROR))
+        transitionJobState(job, BG_JOB_STATE_TRANSFERRING, BG_JOB_STATE_ERROR);
+}
+
+static BOOL write_range_data(struct parallel_range_context *context, DWORD range_index,
+                             UINT64 range_offset, const void *buffer, DWORD size)
+{
+    LARGE_INTEGER offset;
+    DWORD written;
+    BOOL ret;
+
+    offset.QuadPart = context->output_offsets[range_index] + range_offset;
+    EnterCriticalSection(&context->output_cs);
+    ret = SetFilePointerEx(context->output, offset, NULL, FILE_BEGIN) &&
+          WriteFile(context->output, buffer, size, &written, NULL) && written == size;
+    LeaveCriticalSection(&context->output_cs);
+    return ret;
+}
+
+static void CALLBACK parallel_http_callback(HINTERNET handle, DWORD_PTR context, DWORD status,
+                                            void *buffer, DWORD size)
+{
+    struct parallel_http_operation *operation = (struct parallel_http_operation *)context;
+
+    if (!operation) return;
+    switch (status)
+    {
+    case WINHTTP_CALLBACK_STATUS_READ_COMPLETE:
+        operation->read_size = size;
+        SetEvent(operation->event);
+        break;
+    case WINHTTP_CALLBACK_STATUS_REQUEST_ERROR:
+        operation->error = HRESULT_FROM_WIN32(((WINHTTP_ASYNC_RESULT *)buffer)->dwError);
+        SetEvent(operation->event);
+        break;
+    case WINHTTP_CALLBACK_STATUS_SENDREQUEST_COMPLETE:
+    case WINHTTP_CALLBACK_STATUS_HEADERS_AVAILABLE:
+        SetEvent(operation->event);
+        break;
+    case WINHTTP_CALLBACK_STATUS_HANDLE_CLOSING:
+        CloseHandle(operation->event);
+        free(operation);
+        break;
+    default:
+        break;
+    }
+}
+
+static BOOL wait_for_parallel_http(struct parallel_http_operation *operation)
+{
+    DWORD wait;
+
+    for (;;)
+    {
+        if (parallel_transfer_stopped(operation->context)) return FALSE;
+        wait = WaitForSingleObject(operation->event, 100);
+        if (wait == WAIT_OBJECT_0) return SUCCEEDED(operation->error);
+        if (wait != WAIT_TIMEOUT)
+        {
+            operation->error = HRESULT_FROM_WIN32(GetLastError());
+            return FALSE;
+        }
+    }
+}
+
+static void prepare_parallel_http(struct parallel_http_operation *operation)
+{
+    operation->error = S_OK;
+    operation->read_size = 0;
+    ResetEvent(operation->event);
+}
+
+static BOOL transfer_http_range_async(struct parallel_range_context *context, HINTERNET connection,
+                                      DWORD range_index, char *buffer)
+{
+    BackgroundCopyFileImpl *file = context->file;
+    BackgroundCopyJobImpl *job = file->owner;
+    const BG_FILE_RANGE *range = &file->ranges[range_index];
+    WCHAR range_header[96], content_range[128];
+    UINT64 expected, received = 0, start, end, total;
+    struct parallel_http_operation *operation = NULL;
+    DWORD_PTR request_context;
+    HRESULT hr = S_OK;
+    HINTERNET request = NULL;
+    DWORD status, size, read;
+    BOOL callback_owns_operation = FALSE, ret = FALSE;
+
+    if (!(operation = calloc(1, sizeof(*operation))) ||
+        !(operation->event = CreateEventW(NULL, FALSE, FALSE, NULL)))
+    {
+        hr = E_OUTOFMEMORY;
+        goto done;
+    }
+    operation->context = context;
+    request_context = (DWORD_PTR)operation;
+    if (!(request = WinHttpOpenRequest(connection, NULL, context->url->lpszUrlPath, NULL, NULL,
+                                       NULL, context->flags)) ||
+        !WinHttpSetOption(request, WINHTTP_OPTION_CONTEXT_VALUE, &request_context,
+                          sizeof(request_context)))
+    {
+        hr = HRESULT_FROM_WIN32(GetLastError());
+        goto done;
+    }
+    callback_owns_operation = TRUE;
+    if (parallel_transfer_stopped(context)) goto done;
+
+    EnterCriticalSection(&job->cs);
+    ++file->http_connection_count;
+    LeaveCriticalSection(&job->cs);
+    if (!set_request_credentials(request, job))
+    {
+        hr = HRESULT_FROM_WIN32(GetLastError());
+        goto done;
+    }
+
+    swprintf(range_header, ARRAY_SIZE(range_header), L"Range: bytes=%I64u-%I64u\r\n",
+             range->InitialOffset, range->InitialOffset + range->Length - 1);
+    if (!WinHttpAddRequestHeaders(request, range_header, ~0u,
+                                  WINHTTP_ADDREQ_FLAG_ADD | WINHTTP_ADDREQ_FLAG_REPLACE))
+    {
+        hr = HRESULT_FROM_WIN32(GetLastError());
+        goto done;
+    }
+
+    prepare_parallel_http(operation);
+    if (!WinHttpSendRequest(request, job->http_options.headers, ~0u, NULL, 0, 0,
+                            request_context) || !wait_for_parallel_http(operation))
+    {
+        hr = operation->error;
+        goto done;
+    }
+    prepare_parallel_http(operation);
+    if (!WinHttpReceiveResponse(request, NULL) || !wait_for_parallel_http(operation))
+    {
+        hr = operation->error;
+        goto done;
+    }
+
+    size = sizeof(status);
+    if (!WinHttpQueryHeaders(request, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+                             NULL, &status, &size, NULL))
+    {
+        hr = HRESULT_FROM_WIN32(GetLastError());
+        goto done;
+    }
+    if (status != 206)
+    {
+        hr = status == 200 ? BG_E_INSUFFICIENT_RANGE_SUPPORT : hresult_from_http_response(status);
+        goto done;
+    }
+
+    size = sizeof(content_range);
+    if (!WinHttpQueryHeaders(request, WINHTTP_QUERY_CONTENT_RANGE, NULL, content_range, &size, NULL) ||
+        swscanf(content_range, L"bytes %I64u-%I64u/%I64u", &start, &end, &total) != 3 ||
+        end < start || start != range->InitialOffset || total <= end)
+    {
+        hr = BG_E_INSUFFICIENT_RANGE_SUPPORT;
+        goto done;
+    }
+
+    expected = end - start + 1;
+    EnterCriticalSection(&job->cs);
+    if (expected != range->Length ||
+        (context->remote_size != BG_SIZE_UNKNOWN && context->remote_size != total))
+        hr = BG_E_INVALID_RANGE;
+    else
+        context->remote_size = total;
+    LeaveCriticalSection(&job->cs);
+    if (FAILED(hr)) goto done;
+
+    transitionJobState(job, BG_JOB_STATE_CONNECTING, BG_JOB_STATE_TRANSFERRING);
+    while (received < expected)
+    {
+        prepare_parallel_http(operation);
+        if (!WinHttpReadData(request, buffer, HTTP_READ_BUFFER_SIZE, NULL) ||
+            !wait_for_parallel_http(operation))
+        {
+            hr = operation->error;
+            goto done;
+        }
+        read = operation->read_size;
+        if (!read || read > expected - received)
+        {
+            hr = BG_E_INSUFFICIENT_RANGE_SUPPORT;
+            goto done;
+        }
+        if (!write_range_data(context, range_index, received, buffer, read))
+        {
+            hr = HRESULT_FROM_WIN32(GetLastError());
+            goto done;
+        }
+
+        received += read;
+        EnterCriticalSection(&job->cs);
+        file->fileProgress.BytesTransferred += read;
+        job->jobProgress.BytesTransferred += read;
+        LeaveCriticalSection(&job->cs);
+    }
+    ret = TRUE;
+
+ done:
+    if (!ret && !parallel_transfer_stopped(context))
+        set_parallel_range_error(context, FAILED(hr) ? hr : E_FAIL,
+                                 BG_ERROR_CONTEXT_REMOTE_FILE);
+    if (request) WinHttpCloseHandle(request);
+    if (!callback_owns_operation && operation)
+    {
+        if (operation->event) CloseHandle(operation->event);
+        free(operation);
+    }
+    return ret;
+}
+
+static DWORD WINAPI parallel_range_worker(void *param)
+{
+    struct parallel_range_context *context = param;
+    BackgroundCopyFileImpl *file = context->file;
+    HINTERNET session = NULL, connection = NULL;
+    char *buffer = NULL;
+    LONG index;
+
+    if (!(buffer = malloc(HTTP_READ_BUFFER_SIZE)))
+    {
+        set_parallel_range_error(context, E_OUTOFMEMORY, BG_ERROR_CONTEXT_GENERAL_TRANSPORT);
+        goto done;
+    }
+    if (!(session = WinHttpOpen(NULL, 0, NULL, NULL, WINHTTP_FLAG_ASYNC)) ||
+        WinHttpSetStatusCallback(session, parallel_http_callback,
+                                 WINHTTP_CALLBACK_FLAG_ALL_COMPLETIONS |
+                                 WINHTTP_CALLBACK_FLAG_HANDLES, 0) ==
+                                 WINHTTP_INVALID_STATUS_CALLBACK ||
+        !(connection = WinHttpConnect(session, context->url->lpszHostName,
+                                      context->url->nPort, 0)))
+    {
+        set_parallel_range_error(context, HRESULT_FROM_WIN32(GetLastError()),
+                                 BG_ERROR_CONTEXT_GENERAL_TRANSPORT);
+        goto done;
+    }
+
+    while (!parallel_transfer_stopped(context))
+    {
+        index = InterlockedIncrement(&context->next_range) - 1;
+        if ((DWORD)index >= file->range_count) break;
+        if (!transfer_http_range_async(context, connection, index, buffer)) break;
+        InterlockedIncrement(&context->completed_ranges);
+    }
+
+ done:
+    if (connection) WinHttpCloseHandle(connection);
+    if (session) WinHttpCloseHandle(session);
+    free(buffer);
+    return 0;
+}
+
+static BOOL can_transfer_ranges_in_parallel(BackgroundCopyFileImpl *file)
+{
+    DWORD i;
+
+    if (file->download_sink || file->range_count < 2) return FALSE;
+    for (i = 0; i < file->range_count; ++i)
+        if (file->ranges[i].Length == BG_LENGTH_TO_EOF) return FALSE;
+    return TRUE;
+}
+
+static BOOL transfer_http_ranges_parallel(BackgroundCopyFileImpl *file, URL_COMPONENTSW *url,
+                                          DWORD flags, HANDLE output, UINT64 *remote_size)
+{
+    struct parallel_range_context context = {0};
+    HANDLE threads[HTTP_RANGE_WORKER_COUNT];
+    UINT64 output_offset = 0;
+    DWORD count, i;
+    BOOL ret;
+
+    if (!(context.output_offsets = malloc(file->range_count * sizeof(*context.output_offsets))))
+    {
+        set_file_error(file, E_OUTOFMEMORY, BG_ERROR_CONTEXT_GENERAL_TRANSPORT);
+        return FALSE;
+    }
+    for (i = 0; i < file->range_count; ++i)
+    {
+        context.output_offsets[i] = output_offset;
+        if (output_offset > MAXLONGLONG - file->ranges[i].Length)
+        {
+            free(context.output_offsets);
+            set_file_error(file, BG_E_INVALID_RANGE, BG_ERROR_CONTEXT_GENERAL_TRANSPORT);
+            return FALSE;
+        }
+        output_offset += file->ranges[i].Length;
+    }
+
+    context.file = file;
+    context.url = url;
+    context.output = output;
+    context.flags = flags;
+    context.remote_size = BG_SIZE_UNKNOWN;
+    InitializeCriticalSection(&context.output_cs);
+
+    count = min(file->range_count, HTTP_RANGE_WORKER_COUNT);
+    for (i = 0; i < count; ++i)
+        if (!(threads[i] = CreateThread(NULL, 0, parallel_range_worker, &context, 0, NULL))) break;
+    count = i;
+    if (!count)
+        set_parallel_range_error(&context, HRESULT_FROM_WIN32(GetLastError()),
+                                 BG_ERROR_CONTEXT_GENERAL_TRANSPORT);
+    else
+        WaitForMultipleObjects(count, threads, TRUE, INFINITE);
+    for (i = 0; i < count; ++i) CloseHandle(threads[i]);
+
+    ret = !context.failed && (DWORD)context.completed_ranges == file->range_count &&
+          !parallel_transfer_stopped(&context);
+    if (ret) *remote_size = context.remote_size;
+    DeleteCriticalSection(&context.output_cs);
+    free(context.output_offsets);
+    return ret;
+}
+
 static BOOL transfer_http_request(BackgroundCopyFileImpl *file, HINTERNET con, DWORD flags,
                                   const WCHAR *path, const BG_FILE_RANGE *range, HANDLE output,
                                   UINT64 *remote_size)
@@ -729,9 +1089,14 @@ static BOOL transfer_http_request(BackgroundCopyFileImpl *file, HINTERNET con, D
     UINT64 expected = BG_SIZE_UNKNOWN, received = 0;
     DWORD status, size;
     UINT64 start, end, total;
-    char buf[4096];
+    char *buf = NULL;
     BOOL ret = FALSE;
 
+    if (!(buf = malloc(HTTP_READ_BUFFER_SIZE)))
+    {
+        set_file_error(file, E_OUTOFMEMORY, BG_ERROR_CONTEXT_GENERAL_TRANSPORT);
+        goto done;
+    }
     if (!(req = WinHttpOpenRequest(con, NULL, path, NULL, NULL, NULL, flags))) goto done;
     EnterCriticalSection(&job->cs);
     ++file->http_connection_count;
@@ -799,7 +1164,7 @@ static BOOL transfer_http_request(BackgroundCopyFileImpl *file, HINTERNET con, D
     for (;;)
     {
         file->read_size = 0;
-        if (!WinHttpReadData(req, buf, sizeof(buf), NULL)) goto done;
+        if (!WinHttpReadData(req, buf, HTTP_READ_BUFFER_SIZE, NULL)) goto done;
         if (wait_for_completion(job) || FAILED(job->error.code)) goto done;
         if (!file->read_size) break;
         if (!write_download_data(file, output, buf, file->read_size)) goto done;
@@ -826,6 +1191,7 @@ done:
                        BG_ERROR_CONTEXT_GENERAL_TRANSPORT);
     }
     if (req) WinHttpCloseHandle(req);
+    free(buf);
     return ret;
 }
 
@@ -847,11 +1213,6 @@ static BOOL transfer_file_http(BackgroundCopyFileImpl *file, URL_COMPONENTSW *uc
     file->http_connection_count = 0;
     LeaveCriticalSection(&job->cs);
 
-    if (!(ses = WinHttpOpen(NULL, 0, NULL, NULL, WINHTTP_FLAG_ASYNC))) goto done;
-    WinHttpSetStatusCallback(ses, progress_callback_http, WINHTTP_CALLBACK_FLAG_ALL_COMPLETIONS, 0);
-    if (!WinHttpSetOption(ses, WINHTTP_OPTION_CONTEXT_VALUE, &file, sizeof(file))) goto done;
-    if (!(con = WinHttpConnect(ses, uc->lpszHostName, uc->nPort, 0))) goto done;
-
     if (file->download_sink)
     {
         LARGE_INTEGER zero;
@@ -864,19 +1225,34 @@ static BOOL transfer_file_http(BackgroundCopyFileImpl *file, URL_COMPONENTSW *uc
         if (output == INVALID_HANDLE_VALUE) goto done;
     }
 
+    if (can_transfer_ranges_in_parallel(file))
+    {
+        if (!transfer_http_ranges_parallel(file, uc, flags, output, &remote_size)) goto done;
+    }
+    else
+    {
+        if (!(ses = WinHttpOpen(NULL, 0, NULL, NULL, WINHTTP_FLAG_ASYNC))) goto done;
+        WinHttpSetStatusCallback(ses, progress_callback_http, WINHTTP_CALLBACK_FLAG_ALL_COMPLETIONS, 0);
+        if (!WinHttpSetOption(ses, WINHTTP_OPTION_CONTEXT_VALUE, &file, sizeof(file))) goto done;
+        if (!(con = WinHttpConnect(ses, uc->lpszHostName, uc->nPort, 0))) goto done;
+
+        if (file->range_count)
+        {
+            for (i = 0; i < file->range_count; ++i)
+                if (!transfer_http_request(file, con, flags, uc->lpszUrlPath, &file->ranges[i],
+                                           output, &remote_size))
+                    goto done;
+        }
+        else if (!transfer_http_request(file, con, flags, uc->lpszUrlPath, NULL, output, &remote_size))
+            goto done;
+    }
+
     if (file->range_count)
     {
-        for (i = 0; i < file->range_count; ++i)
-            if (!transfer_http_request(file, con, flags, uc->lpszUrlPath, &file->ranges[i],
-                                       output, &remote_size))
-                goto done;
-
         EnterCriticalSection(&job->cs);
         file->fileProgress.BytesTotal = file->fileProgress.BytesTransferred;
         LeaveCriticalSection(&job->cs);
     }
-    else if (!transfer_http_request(file, con, flags, uc->lpszUrlPath, NULL, output, &remote_size))
-        goto done;
 
     EnterCriticalSection(&job->cs);
     if (file->source_size == DO_UNKNOWN_FILE_SIZE)
