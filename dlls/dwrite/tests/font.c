@@ -6129,6 +6129,43 @@ static void test_CreateGlyphRunAnalysis(void)
 
     if (IDWriteFactory_QueryInterface(factory, &IID_IDWriteFactory2, (void **)&factory2) == S_OK) {
         FLOAT gamma, contrast, cleartype_level;
+        BOOL has_partial_alpha;
+        unsigned int j;
+
+        /* Rendering an aliased run must not poison the face cache for a later
+         * antialiased run of the same glyphs and size. */
+        hr = IDWriteFactory2_CreateGlyphRunAnalysis(factory2, &run, NULL, DWRITE_RENDERING_MODE_ALIASED,
+                DWRITE_MEASURING_MODE_NATURAL, DWRITE_GRID_FIT_MODE_DISABLED, DWRITE_TEXT_ANTIALIAS_MODE_CLEARTYPE,
+                0.0f, 0.0f, &analysis);
+        ok(hr == S_OK, "Failed to create aliased analysis, hr %#lx.\n", hr);
+        SetRectEmpty(&rect);
+        hr = IDWriteGlyphRunAnalysis_GetAlphaTextureBounds(analysis, DWRITE_TEXTURE_ALIASED_1x1, &rect);
+        ok(hr == S_OK, "Failed to get aliased texture bounds, hr %#lx.\n", hr);
+        size = (rect.right - rect.left) * (rect.bottom - rect.top);
+        bits = malloc(size);
+        hr = IDWriteGlyphRunAnalysis_CreateAlphaTexture(analysis, DWRITE_TEXTURE_ALIASED_1x1, &rect, bits, size);
+        ok(hr == S_OK, "Failed to get aliased alpha texture, hr %#lx.\n", hr);
+        free(bits);
+        IDWriteGlyphRunAnalysis_Release(analysis);
+
+        hr = IDWriteFactory2_CreateGlyphRunAnalysis(factory2, &run, NULL, DWRITE_RENDERING_MODE_NATURAL,
+                DWRITE_MEASURING_MODE_NATURAL, DWRITE_GRID_FIT_MODE_DISABLED, DWRITE_TEXT_ANTIALIAS_MODE_GRAYSCALE,
+                0.0f, 0.0f, &analysis);
+        ok(hr == S_OK, "Failed to create antialiased analysis, hr %#lx.\n", hr);
+        SetRectEmpty(&rect);
+        hr = IDWriteGlyphRunAnalysis_GetAlphaTextureBounds(analysis, DWRITE_TEXTURE_ALIASED_1x1, &rect);
+        ok(hr == S_OK, "Failed to get antialiased texture bounds, hr %#lx.\n", hr);
+        size = (rect.right - rect.left) * (rect.bottom - rect.top);
+        bits = malloc(size);
+        hr = IDWriteGlyphRunAnalysis_CreateAlphaTexture(analysis, DWRITE_TEXTURE_ALIASED_1x1, &rect, bits, size);
+        ok(hr == S_OK, "Failed to get antialiased alpha texture, hr %#lx.\n", hr);
+        has_partial_alpha = FALSE;
+        for (j = 0; j < size; ++j)
+            if (bits[j] && bits[j] != 0xff)
+                has_partial_alpha = TRUE;
+        ok(has_partial_alpha, "Expected partially covered pixels in antialiased texture.\n");
+        free(bits);
+        IDWriteGlyphRunAnalysis_Release(analysis);
 
         /* Invalid antialias mode. */
         hr = IDWriteFactory2_CreateGlyphRunAnalysis(factory2, &run, NULL, DWRITE_RENDERING_MODE_ALIASED,
