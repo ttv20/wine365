@@ -38,11 +38,19 @@
 #include "windows.data.json.h"
 #define WIDL_using_Windows_Security_Authorization_AppCapabilityAccess
 #include "windows.security.authorization.appcapabilityaccess.h"
+#define WIDL_using_Windows_Web_Http
+#define WIDL_using_Windows_Web_Http_Filters
+#include "windows.web.http.h"
+typedef __x_ABI_CWindows_CWeb_CHttp_CHttpCompletionOption HttpCompletionOption;
+typedef __x_ABI_CWindows_CWeb_CHttp_CFilters_CHttpCacheReadBehavior HttpCacheReadBehavior;
+typedef __x_ABI_CWindows_CWeb_CHttp_CFilters_CHttpCacheWriteBehavior HttpCacheWriteBehavior;
 
 extern IActivationFactory *app_capability_factory;
 extern IActivationFactory *json_array_factory;
 extern IActivationFactory *json_object_factory;
 extern IActivationFactory *json_value_factory;
+extern IActivationFactory *http_client_factory;
+extern IActivationFactory *protocol_filter_factory;
 
 HRESULT json_array_push( IJsonArray *iface, IJsonValue *value );
 HRESULT json_value_parse( HSTRING input, IJsonValue **value );

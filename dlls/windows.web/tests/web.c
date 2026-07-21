@@ -32,6 +32,10 @@
 #include "windows.data.json.h"
 #define WIDL_using_Windows_Security_Authorization_AppCapabilityAccess
 #include "windows.security.authorization.appcapabilityaccess.h"
+#define WIDL_using_Windows_Web_Http
+#define WIDL_using_Windows_Web_Http_Filters
+#include "windows.web.http.h"
+typedef __x_ABI_CWindows_CWeb_CHttp_CFilters_CHttpCacheReadBehavior HttpCacheReadBehavior;
 
 #include "wine/test.h"
 
@@ -950,6 +954,110 @@ static void test_AppCapability(void)
     IAppCapabilityStatics_Release( statics );
 }
 
+static void test_HttpClient(void)
+{
+    static const WCHAR filter_name[] = L"Windows.Web.Http.Filters.HttpBaseProtocolFilter";
+    static const WCHAR client_name[] = L"Windows.Web.Http.HttpClient";
+    IHttpBaseProtocolFilter *base_filter = NULL;
+    IHttpCacheControl *cache_control = NULL;
+    IHttpClientFactory *client_factory = NULL;
+    IActivationFactory *factory = NULL;
+    IInspectable *inspectable = NULL;
+    IHttpFilter *filter = NULL;
+    IHttpClient *client = NULL;
+    IClosable *closable = NULL;
+    IStringable *stringable = NULL;
+    HttpCacheReadBehavior read_behavior;
+    HSTRING class = NULL;
+    boolean value;
+    HRESULT hr;
+
+    hr = WindowsCreateString( filter_name, ARRAY_SIZE(filter_name) - 1, &class );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    hr = RoGetActivationFactory( class, &IID_IActivationFactory, (void **)&factory );
+    if (hr == REGDB_E_CLASSNOTREG)
+    {
+        win_skip( "%s runtimeclass not registered, skipping tests.\n", wine_dbgstr_w( filter_name ) );
+        WindowsDeleteString( class );
+        return;
+    }
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    check_interface( factory, &IID_IInspectable );
+    check_interface( factory, &IID_IAgileObject );
+    IActivationFactory_Release( factory );
+
+    hr = RoActivateInstance( class, &inspectable );
+    WindowsDeleteString( class );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    if (FAILED(hr)) return;
+
+    hr = IInspectable_QueryInterface( inspectable, &IID_IHttpBaseProtocolFilter, (void **)&base_filter );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    hr = IInspectable_QueryInterface( inspectable, &IID_IHttpFilter, (void **)&filter );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    hr = IInspectable_QueryInterface( inspectable, &IID_IClosable, (void **)&closable );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    check_interface( inspectable, &IID_IAgileObject );
+
+    hr = IHttpBaseProtocolFilter_get_AllowAutoRedirect( base_filter, &value );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    ok( value, "expected automatic redirects to be enabled.\n" );
+    hr = IHttpBaseProtocolFilter_put_AllowAutoRedirect( base_filter, FALSE );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    hr = IHttpBaseProtocolFilter_get_AllowAutoRedirect( base_filter, &value );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    ok( !value, "expected automatic redirects to be disabled.\n" );
+
+    hr = IHttpBaseProtocolFilter_put_AllowUI( base_filter, FALSE );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    hr = IHttpBaseProtocolFilter_get_AllowUI( base_filter, &value );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    ok( !value, "expected UI to be disabled.\n" );
+
+    hr = IHttpBaseProtocolFilter_get_CacheControl( base_filter, &cache_control );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    hr = IHttpCacheControl_get_ReadBehavior( cache_control, &read_behavior );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    ok( read_behavior == HttpCacheReadBehavior_Default, "got read behavior %u.\n", read_behavior );
+    hr = IHttpCacheControl_put_ReadBehavior( cache_control, HttpCacheReadBehavior_NoCache );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    hr = IHttpCacheControl_get_ReadBehavior( cache_control, &read_behavior );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    ok( read_behavior == HttpCacheReadBehavior_NoCache, "got read behavior %u.\n", read_behavior );
+    IHttpCacheControl_Release( cache_control );
+
+    hr = IClosable_Close( closable );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    IClosable_Release( closable );
+    IHttpBaseProtocolFilter_Release( base_filter );
+    IInspectable_Release( inspectable );
+
+    hr = WindowsCreateString( client_name, ARRAY_SIZE(client_name) - 1, &class );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    hr = RoGetActivationFactory( class, &IID_IHttpClientFactory, (void **)&client_factory );
+    WindowsDeleteString( class );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    if (SUCCEEDED(hr))
+    {
+        hr = IHttpClientFactory_Create( client_factory, filter, &client );
+        ok( hr == S_OK, "got hr %#lx.\n", hr );
+        if (SUCCEEDED(hr))
+        {
+            check_interface( client, &IID_IInspectable );
+            check_interface( client, &IID_IAgileObject );
+            hr = IHttpClient_QueryInterface( client, &IID_IClosable, (void **)&closable );
+            ok( hr == S_OK, "got hr %#lx.\n", hr );
+            hr = IHttpClient_QueryInterface( client, &IID_IStringable, (void **)&stringable );
+            ok( hr == S_OK, "got hr %#lx.\n", hr );
+            if (closable) IClosable_Release( closable );
+            if (stringable) IStringable_Release( stringable );
+            IHttpClient_Release( client );
+        }
+        IHttpClientFactory_Release( client_factory );
+    }
+    IHttpFilter_Release( filter );
+}
+
 START_TEST(web)
 {
     HRESULT hr;
@@ -961,6 +1069,7 @@ START_TEST(web)
     test_JsonObjectStatics();
     test_JsonValueStatics();
     test_AppCapability();
+    test_HttpClient();
 
     RoUninitialize();
 }

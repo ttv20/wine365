@@ -1,0 +1,170 @@
+/* Windows.Web.Http interface definitions
+ *
+ * Copyright 2026 Wine contributors
+ *
+ * This library is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation; either
+ * version 2.1 of the License, or (at your option) any later version.
+ */
+
+#ifdef __WIDL__
+#pragma winrt ns_prefix
+#endif
+
+import "inspectable.idl";
+import "windows.foundation.idl";
+
+namespace Windows.Web.Http.Filters
+{
+    interface IHttpFilter;
+}
+
+namespace Windows.Web.Http
+{
+    typedef enum HttpCompletionOption
+    {
+        ResponseContentRead = 0,
+        ResponseHeadersRead = 1,
+    } HttpCompletionOption;
+
+    runtimeclass HttpClient;
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        exclusiveto(Windows.Web.Http.HttpClient),
+        uuid(7fda1151-3574-4880-a8ba-e6b1e0061f3d)
+    ]
+    interface IHttpClient : IInspectable
+    {
+        HRESULT DeleteAsync([in] IInspectable *uri, [out, retval] IInspectable **operation);
+        HRESULT GetAsync([in] IInspectable *uri, [out, retval] IInspectable **operation);
+        HRESULT GetWithOptionAsync([in] IInspectable *uri, [in] Windows.Web.Http.HttpCompletionOption option, [out, retval] IInspectable **operation);
+        HRESULT GetBufferAsync([in] IInspectable *uri, [out, retval] IInspectable **operation);
+        HRESULT GetInputStreamAsync([in] IInspectable *uri, [out, retval] IInspectable **operation);
+        HRESULT GetStringAsync([in] IInspectable *uri, [out, retval] IInspectable **operation);
+        HRESULT PostAsync([in] IInspectable *uri, [in] IInspectable *content, [out, retval] IInspectable **operation);
+        HRESULT PutAsync([in] IInspectable *uri, [in] IInspectable *content, [out, retval] IInspectable **operation);
+        HRESULT SendRequestAsync([in] IInspectable *request, [out, retval] IInspectable **operation);
+        HRESULT SendRequestWithOptionAsync([in] IInspectable *request, [in] Windows.Web.Http.HttpCompletionOption option, [out, retval] IInspectable **operation);
+        [propget] HRESULT DefaultRequestHeaders([out, retval] IInspectable **value);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        exclusiveto(Windows.Web.Http.HttpClient),
+        uuid(c30c4eca-e3fa-4f99-afb4-63cc65009462)
+    ]
+    interface IHttpClientFactory : IInspectable
+    {
+        HRESULT Create([in] Windows.Web.Http.Filters.IHttpFilter *filter, [out, retval] Windows.Web.Http.HttpClient **client);
+    }
+
+    [
+        activatable(Windows.Foundation.UniversalApiContract, 1.0),
+        activatable(Windows.Web.Http.IHttpClientFactory, Windows.Foundation.UniversalApiContract, 1.0),
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        marshaling_behavior(agile),
+        threading(both)
+    ]
+    runtimeclass HttpClient
+    {
+        [default] interface Windows.Web.Http.IHttpClient;
+        interface Windows.Foundation.IClosable;
+        interface Windows.Foundation.IStringable;
+    }
+}
+
+namespace Windows.Web.Http.Filters
+{
+    typedef enum HttpCacheReadBehavior
+    {
+        Default = 0,
+        MostRecent = 1,
+        OnlyFromCache = 2,
+        NoCache = 3,
+    } HttpCacheReadBehavior;
+
+    typedef enum HttpCacheWriteBehavior
+    {
+        Default = 0,
+        NoCache = 1,
+    } HttpCacheWriteBehavior;
+
+    runtimeclass HttpCacheControl;
+    runtimeclass HttpBaseProtocolFilter;
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        exclusiveto(Windows.Web.Http.Filters.HttpBaseProtocolFilter),
+        uuid(a4cb6dd5-0902-439e-bfd7-e12552b165ce)
+    ]
+    interface IHttpFilter : IInspectable
+    {
+        HRESULT SendRequestAsync([in] IInspectable *request, [out, retval] IInspectable **operation);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        exclusiveto(Windows.Web.Http.Filters.HttpBaseProtocolFilter),
+        uuid(71c89b09-e131-4b54-a53c-eb43ff37e9bb)
+    ]
+    interface IHttpBaseProtocolFilter : IInspectable
+    {
+        [propget] HRESULT AllowAutoRedirect([out, retval] boolean *value);
+        [propput] HRESULT AllowAutoRedirect([in] boolean value);
+        [propget] HRESULT AllowUI([out, retval] boolean *value);
+        [propput] HRESULT AllowUI([in] boolean value);
+        [propget] HRESULT AutomaticDecompression([out, retval] boolean *value);
+        [propput] HRESULT AutomaticDecompression([in] boolean value);
+        [propget] HRESULT CacheControl([out, retval] Windows.Web.Http.Filters.HttpCacheControl **value);
+        [propget] HRESULT CookieManager([out, retval] IInspectable **value);
+        [propget] HRESULT ClientCertificate([out, retval] IInspectable **value);
+        [propput] HRESULT ClientCertificate([in] IInspectable *value);
+        [propget] HRESULT IgnorableServerCertificateErrors([out, retval] IInspectable **value);
+        [propget] HRESULT MaxConnectionsPerServer([out, retval] UINT32 *value);
+        [propput] HRESULT MaxConnectionsPerServer([in] UINT32 value);
+        [propget] HRESULT ProxyCredential([out, retval] IInspectable **value);
+        [propput] HRESULT ProxyCredential([in] IInspectable *value);
+        [propget] HRESULT ServerCredential([out, retval] IInspectable **value);
+        [propput] HRESULT ServerCredential([in] IInspectable *value);
+        [propget] HRESULT UseProxy([out, retval] boolean *value);
+        [propput] HRESULT UseProxy([in] boolean value);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        exclusiveto(Windows.Web.Http.Filters.HttpCacheControl),
+        uuid(c77e1cb4-3cea-4eb5-ac85-04e186e63ab7)
+    ]
+    interface IHttpCacheControl : IInspectable
+    {
+        [propget] HRESULT ReadBehavior([out, retval] Windows.Web.Http.Filters.HttpCacheReadBehavior *value);
+        [propput] HRESULT ReadBehavior([in] Windows.Web.Http.Filters.HttpCacheReadBehavior value);
+        [propget] HRESULT WriteBehavior([out, retval] Windows.Web.Http.Filters.HttpCacheWriteBehavior *value);
+        [propput] HRESULT WriteBehavior([in] Windows.Web.Http.Filters.HttpCacheWriteBehavior value);
+    }
+
+    [
+        activatable(Windows.Foundation.UniversalApiContract, 1.0),
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        marshaling_behavior(agile),
+        threading(both)
+    ]
+    runtimeclass HttpBaseProtocolFilter
+    {
+        [default] interface Windows.Web.Http.Filters.IHttpBaseProtocolFilter;
+        interface Windows.Web.Http.Filters.IHttpFilter;
+        interface Windows.Foundation.IClosable;
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        marshaling_behavior(agile),
+        threading(both)
+    ]
+    runtimeclass HttpCacheControl
+    {
+        [default] interface Windows.Web.Http.Filters.IHttpCacheControl;
+    }
+}
