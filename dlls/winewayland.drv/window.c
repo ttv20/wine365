@@ -158,6 +158,7 @@ void wayland_win_data_restack_owned_popups(HWND toplevel)
     struct wayland_surface *toplevel_surface, *popup;
     struct wayland_client_surface *client;
     BOOL popup_found = FALSE;
+    RECT intersection;
     DWORD style;
 
     if (!(toplevel_data = wayland_win_data_get_nolock(toplevel)) ||
@@ -170,6 +171,15 @@ void wayland_win_data_restack_owned_popups(HWND toplevel)
         popup = data->wayland_surface;
         if (!popup || popup->role != WAYLAND_SURFACE_ROLE_SUBSURFACE ||
             popup->owner_hwnd != toplevel || !popup->window.visible)
+            continue;
+        /* Thin border and shadow strips don't cover owner contents and must
+         * not trigger a rebuild of the client stack, including while their
+         * geometry is briefly stale during an owner resize. */
+        if (popup->window.rect.right - popup->window.rect.left <= 16 ||
+            popup->window.rect.bottom - popup->window.rect.top <= 16)
+            continue;
+        if (!intersect_rect(&intersection, &popup->window.rect,
+                            &toplevel_surface->window.rect))
             continue;
         style = NtUserGetWindowLongW(data->hwnd, GWL_STYLE);
         if (!(style & WS_POPUP)) continue;
@@ -429,6 +439,37 @@ static inline HWND get_active_window(void)
     return NtUserGetGUIThreadInfo(GetCurrentThreadId(), &info) ? info.hwndActive : 0;
 }
 
+/* Find a same-process toplevel immediately adjacent to an unmanaged popup.
+ * Some applications implement shadows and borders as thin, unowned popup
+ * windows just outside the main window. The generic owner hint probes only
+ * above and to the left of the popup, which misses three of the four strips
+ * and leaves them as independently positioned xdg_toplevels. */
+static HWND find_adjacent_window(HWND hwnd, const RECT *rect)
+{
+    LONG center_x = rect->left + (rect->right - rect->left) / 2;
+    LONG center_y = rect->top + (rect->bottom - rect->top) / 2;
+    const POINT points[] =
+    {
+        {rect->left - 1, center_y}, {rect->right, center_y},
+        {center_x, rect->top - 1}, {center_x, rect->bottom},
+    };
+    DWORD process_id, candidate_process_id;
+    HWND candidate;
+    unsigned int i;
+
+    NtUserGetWindowThread(hwnd, &process_id);
+    for (i = 0; i < ARRAY_SIZE(points); ++i)
+    {
+        if (!(candidate = NtUserWindowFromPoint(points[i].x, points[i].y))) continue;
+        candidate = NtUserGetAncestor(candidate, GA_ROOT);
+        if (!candidate || candidate == hwnd) continue;
+        NtUserGetWindowThread(candidate, &candidate_process_id);
+        if (candidate_process_id == process_id) return candidate;
+    }
+
+    return 0;
+}
+
 /***********************************************************************
  *		is_window_managed
  *
@@ -513,6 +554,7 @@ void WAYLAND_WindowPosChanged(HWND hwnd, HWND insert_after, HWND owner_hint, UIN
 {
     HWND owner = NtUserGetAncestor(hwnd, GA_ROOT);
     HWND transient_owner = NtUserGetWindowRelative(hwnd, GW_OWNER);
+    HWND adjacent_owner;
     struct wayland_surface *owner_surface, *transient_parent_surface;
     struct wayland_win_data *data, *owner_data, *transient_owner_data;
     BOOL managed, fullscreen = swp_flags & WINE_SWP_FULLSCREEN;
@@ -522,7 +564,18 @@ void WAYLAND_WindowPosChanged(HWND hwnd, HWND insert_after, HWND owner_hint, UIN
     /* Get the managed state with win_data unlocked, as is_window_managed
      * may need to query win_data information about other HWNDs and thus
      * acquire the lock itself internally. */
-    if (!(managed = is_window_managed(hwnd, swp_flags, fullscreen)) && surface) owner = owner_hint;
+    if (!(managed = is_window_managed(hwnd, swp_flags, fullscreen)) && surface)
+    {
+        DWORD style = NtUserGetWindowLongW(hwnd, GWL_STYLE);
+        LONG width = new_rects->window.right - new_rects->window.left;
+        LONG height = new_rects->window.bottom - new_rects->window.top;
+
+        owner = owner_hint;
+        if (!transient_owner && (style & WS_POPUP) && !(style & WS_THICKFRAME) &&
+            (width <= 16 || height <= 16) &&
+            (adjacent_owner = find_adjacent_window(hwnd, &new_rects->window)))
+            owner = adjacent_owner;
+    }
     if (transient_owner) transient_owner = NtUserGetAncestor(transient_owner, GA_ROOT);
 
     if (!(data = wayland_win_data_get(hwnd))) return;
