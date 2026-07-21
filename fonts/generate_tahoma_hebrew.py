@@ -16,6 +16,7 @@ from fontTools.ttLib import TTFont
 
 HEBREW_RANGES = "U+0590-05FF,U+FB1D-FB4F"
 PRESERVED_TABLES = ("BDF ", "EBDT", "EBLC", "FFTM", "VDMX")
+SMOOTH_GASP_RANGES = {8: 2, 16: 3, 65535: 3}
 
 
 def run_module(module, *args):
@@ -55,6 +56,10 @@ def build(base_path, donor_path, output_path, workdir):
         if tag in base:
             merged[tag] = copy.deepcopy(base[tag])
 
+    # Wine enables font smoothing by default. Keep hinting above 8 ppem, but
+    # request grayscale outlines at every size instead of selecting the
+    # monochrome embedded strikes used by legacy dialogs.
+    merged["gasp"].gaspRange = SMOOTH_GASP_RANGES
     merged["head"].created = base["head"].created
     merged["head"].modified = base["head"].modified
     merged.recalcTimestamp = False
