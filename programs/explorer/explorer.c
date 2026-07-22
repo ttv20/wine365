@@ -39,13 +39,18 @@ WINE_DEFAULT_DEBUG_CHANNEL(explorer);
 
 #define EXPLORER_INFO_INDEX 0
 
-#define NAV_TOOLBAR_HEIGHT 30
+#define NAV_TOOLBAR_HEIGHT 48
 #define PATHBOX_HEIGHT 240
+#define NAV_ICON_SIZE 20
+#define NAV_BUTTON_WIDTH 36
+#define IDI_WINE_NAV_BACK 1008
+#define IDI_WINE_NAV_FORWARD 1009
+#define IDI_WINE_NAV_UP 1010
 static int nav_toolbar_height;
 static int pathbox_height;
 
-#define DEFAULT_WIDTH 640
-#define DEFAULT_HEIGHT 480
+#define DEFAULT_WIDTH 800
+#define DEFAULT_HEIGHT 560
 static int default_width;
 static int default_height;
 
@@ -61,10 +66,12 @@ typedef struct parametersTAG {
 typedef struct
 {
     IExplorerBrowser *browser;
-    HWND main_window,path_box;
+    HWND main_window, nav_toolbar, path_box;
     INT rebar_height;
     LPITEMIDLIST pidl;
     IImageList *icon_list;
+    HIMAGELIST nav_icons;
+    HFONT ui_font;
     DWORD advise_cookie;
 
     IShellWindows *sw;
@@ -364,20 +371,49 @@ static IShellFolder *get_starting_shell_folder(WCHAR *path)
     return folder;
 }
 
+static HFONT create_explorer_font(UINT dpiy)
+{
+    NONCLIENTMETRICSW metrics = { .cbSize = sizeof(metrics) };
+
+    if (!SystemParametersInfoW(SPI_GETNONCLIENTMETRICS, sizeof(metrics), &metrics, 0))
+        return NULL;
+    metrics.lfMessageFont.lfHeight -= MulDiv(2, dpiy, 72);
+    return CreateFontIndirectW(&metrics.lfMessageFont);
+}
+
+static HIMAGELIST create_nav_icons(UINT dpix)
+{
+    static const UINT resource_ids[] = { IDI_WINE_NAV_BACK, IDI_WINE_NAV_FORWARD, IDI_WINE_NAV_UP };
+    HINSTANCE shell32 = GetModuleHandleW(L"shell32.dll");
+    int size = MulDiv(NAV_ICON_SIZE, dpix, USER_DEFAULT_SCREEN_DPI);
+    HIMAGELIST icons;
+    unsigned int i;
+
+    if (!shell32) shell32 = LoadLibraryW(L"shell32.dll");
+    if (!(icons = ImageList_Create(size, size, ILC_COLOR32, ARRAY_SIZE(resource_ids), 1))) return NULL;
+
+    for (i = 0; i < ARRAY_SIZE(resource_ids); ++i)
+    {
+        HICON icon = LoadImageW(shell32, MAKEINTRESOURCEW(resource_ids[i]), IMAGE_ICON,
+                                size, size, LR_DEFAULTCOLOR);
+        if (icon)
+        {
+            ImageList_AddIcon(icons, icon);
+            DestroyIcon(icon);
+        }
+    }
+    return icons;
+}
+
 static void make_explorer_window(parameters_struct *params)
 {
     RECT rect;
-    HWND rebar,nav_toolbar;
     FOLDERSETTINGS fs;
     IExplorerBrowserEvents *events;
     explorer_info *info;
     HRESULT hres;
     WCHAR explorer_title[100];
-    WCHAR pathbox_label[50];
-    TBADDBITMAP bitmap_info;
     TBBUTTON nav_buttons[3];
-    int hist_offset,view_offset;
-    REBARBANDINFOW band_info;
     VARIANT var, empty_var;
     IShellFolder *folder;
     IDispatch *dispatch;
@@ -428,7 +464,6 @@ static void make_explorer_window(parameters_struct *params)
     memset(nav_buttons,0,sizeof(nav_buttons));
 
     LoadStringW(explorer_hInstance,IDS_EXPLORER_TITLE,explorer_title, ARRAY_SIZE( explorer_title ));
-    LoadStringW(explorer_hInstance,IDS_PATHBOX_LABEL,pathbox_label, ARRAY_SIZE( pathbox_label ));
 
     hdc = GetDC(0);
     dpix = GetDeviceCaps(hdc, LOGPIXELSX);
@@ -458,6 +493,7 @@ static void make_explorer_window(parameters_struct *params)
         return;
     }
     info->rebar_height=0;
+    info->ui_font = create_explorer_font(dpiy);
     info->main_window
         = CreateWindowW(L"ExplorerWClass",explorer_title,WS_OVERLAPPEDWINDOW,
                         CW_USEDEFAULT,CW_USEDEFAULT,default_width,
@@ -477,59 +513,48 @@ static void make_explorer_window(parameters_struct *params)
     IExplorerBrowser_SetOptions(info->browser,EBO_SHOWFRAMES);
     SetWindowLongPtrW(info->main_window,EXPLORER_INFO_INDEX,(LONG_PTR)info);
 
-    /*setup navbar*/
-    rebar = CreateWindowExW(WS_EX_TOOLWINDOW,REBARCLASSNAMEW,NULL,
-                            WS_CHILD|WS_VISIBLE|RBS_VARHEIGHT|CCS_TOP|CCS_NODIVIDER,
-                            0,0,0,0,info->main_window,NULL,explorer_hInstance,NULL);
-    nav_toolbar
-        = CreateWindowExW(TBSTYLE_EX_MIXEDBUTTONS,TOOLBARCLASSNAMEW,NULL,
-                          WS_CHILD|WS_VISIBLE|TBSTYLE_FLAT,0,0,0,0,rebar,NULL,
-                          explorer_hInstance,NULL);
+    /* Set up one Windows 10-style navigation row. */
+    info->nav_toolbar = CreateWindowExW(TBSTYLE_EX_MIXEDBUTTONS, TOOLBARCLASSNAMEW, NULL,
+                          WS_CHILD | WS_VISIBLE | TBSTYLE_FLAT | CCS_NODIVIDER | CCS_NORESIZE,
+                          8, 6, MulDiv(NAV_BUTTON_WIDTH * 3, dpix, USER_DEFAULT_SCREEN_DPI),
+                          nav_toolbar_height - 12, info->main_window, NULL, explorer_hInstance, NULL);
 
-    bitmap_info.hInst = HINST_COMMCTRL;
-    bitmap_info.nID = IDB_HIST_LARGE_COLOR;
-    hist_offset= SendMessageW(nav_toolbar,TB_ADDBITMAP,0,(LPARAM)&bitmap_info);
-    bitmap_info.nID = IDB_VIEW_LARGE_COLOR;
-    view_offset= SendMessageW(nav_toolbar,TB_ADDBITMAP,0,(LPARAM)&bitmap_info);
+    info->nav_icons = create_nav_icons(dpix);
+    SendMessageW(info->nav_toolbar, TB_SETIMAGELIST, 0, (LPARAM)info->nav_icons);
 
-    nav_buttons[0].iBitmap=hist_offset+HIST_BACK;
+    nav_buttons[0].iBitmap=0;
     nav_buttons[0].idCommand=BACK_BUTTON;
     nav_buttons[0].fsState=TBSTATE_ENABLED;
     nav_buttons[0].fsStyle=BTNS_BUTTON|BTNS_AUTOSIZE;
-    nav_buttons[1].iBitmap=hist_offset+HIST_FORWARD;
+    nav_buttons[1].iBitmap=1;
     nav_buttons[1].idCommand=FORWARD_BUTTON;
     nav_buttons[1].fsState=TBSTATE_ENABLED;
     nav_buttons[1].fsStyle=BTNS_BUTTON|BTNS_AUTOSIZE;
-    nav_buttons[2].iBitmap=view_offset+VIEW_PARENTFOLDER;
+    nav_buttons[2].iBitmap=2;
     nav_buttons[2].idCommand=UP_BUTTON;
     nav_buttons[2].fsState=TBSTATE_ENABLED;
     nav_buttons[2].fsStyle=BTNS_BUTTON|BTNS_AUTOSIZE;
-    SendMessageW(nav_toolbar,TB_BUTTONSTRUCTSIZE,sizeof(TBBUTTON),0);
-    SendMessageW(nav_toolbar,TB_ADDBUTTONSW,ARRAY_SIZE( nav_buttons ),(LPARAM)nav_buttons);
+    SendMessageW(info->nav_toolbar,TB_BUTTONSTRUCTSIZE,sizeof(TBBUTTON),0);
+    SendMessageW(info->nav_toolbar,TB_ADDBUTTONSW,ARRAY_SIZE( nav_buttons ),(LPARAM)nav_buttons);
+    SendMessageW(info->nav_toolbar, TB_SETBUTTONSIZE, 0,
+                 MAKELPARAM(MulDiv(NAV_BUTTON_WIDTH, dpix, USER_DEFAULT_SCREEN_DPI),
+                            MulDiv(32, dpiy, USER_DEFAULT_SCREEN_DPI)));
+    if (info->ui_font) SendMessageW(info->nav_toolbar, WM_SETFONT, (WPARAM)info->ui_font, TRUE);
 
-    band_info.cbSize = sizeof(band_info);
-    band_info.fMask = RBBIM_STYLE|RBBIM_CHILD|RBBIM_CHILDSIZE|RBBIM_SIZE;
-    band_info.hwndChild = nav_toolbar;
-    band_info.fStyle=RBBS_GRIPPERALWAYS|RBBS_CHILDEDGE;
-    band_info.cyChild=nav_toolbar_height;
-    band_info.cx=0;
-    band_info.cyMinChild=nav_toolbar_height;
-    band_info.cxMinChild=0;
-    SendMessageW(rebar,RB_INSERTBANDW,-1,(LPARAM)&band_info);
-    info->path_box = CreateWindowW(WC_COMBOBOXEXW,L"",
-                                   WS_CHILD | WS_VISIBLE | CBS_DROPDOWN,
-                                   0,0,default_width,pathbox_height,rebar,NULL,
-                                   explorer_hInstance,NULL);
-    GetWindowRect(info->path_box, &rect);
-    band_info.cyChild = rect.bottom - rect.top;
-    band_info.cx=0;
-    band_info.cyMinChild = rect.bottom - rect.top;
-    band_info.cxMinChild=0;
-    band_info.fMask|=RBBIM_TEXT;
-    band_info.lpText=pathbox_label;
-    band_info.fStyle|=RBBS_BREAK;
-    band_info.hwndChild=info->path_box;
-    SendMessageW(rebar,RB_INSERTBANDW,-1,(LPARAM)&band_info);
+    info->path_box = CreateWindowExW(WS_EX_CLIENTEDGE, WC_COMBOBOXEXW, L"",
+                                   WS_CHILD | WS_VISIBLE | WS_TABSTOP | CBS_DROPDOWN | CBS_AUTOHSCROLL,
+                                   MulDiv(NAV_BUTTON_WIDTH * 3 + 16, dpix, USER_DEFAULT_SCREEN_DPI), 8,
+                                   default_width - MulDiv(NAV_BUTTON_WIDTH * 3 + 24, dpix, USER_DEFAULT_SCREEN_DPI),
+                                   pathbox_height, info->main_window, NULL, explorer_hInstance, NULL);
+    if (info->ui_font)
+    {
+        SendMessageW(info->path_box, WM_SETFONT, (WPARAM)info->ui_font, TRUE);
+        SendMessageW((HWND)SendMessageW(info->path_box, CBEM_GETEDITCONTROL, 0, 0),
+                     WM_SETFONT, (WPARAM)info->ui_font, TRUE);
+    }
+    info->rebar_height = nav_toolbar_height;
+    SetRect(&rect, 0, info->rebar_height, default_width, default_height);
+    IExplorerBrowser_SetRect(info->browser, NULL, rect);
     events = make_explorer_events(info);
     IExplorerBrowser_Advise(info->browser,events,&info->advise_cookie);
 
@@ -544,6 +569,14 @@ static void make_explorer_window(parameters_struct *params)
 
     while (GetMessageW(&msg, NULL, 0, 0))
     {
+        if (((msg.message == WM_KEYDOWN && msg.wParam == 'L' && GetKeyState(VK_CONTROL) < 0) ||
+             (msg.message == WM_SYSKEYDOWN && msg.wParam == 'D' && GetKeyState(VK_MENU) < 0)))
+        {
+            HWND edit = (HWND)SendMessageW(info->path_box, CBEM_GETEDITCONTROL, 0, 0);
+            SetFocus(edit);
+            SendMessageW(edit, EM_SETSEL, 0, -1);
+            continue;
+        }
         TranslateMessage(&msg);
         DispatchMessageW(&msg);
     }
@@ -551,7 +584,13 @@ static void make_explorer_window(parameters_struct *params)
 
 static void update_window_size(explorer_info *info, int height, int width)
 {
+    UINT dpi = GetDpiForWindow(info->main_window);
+    int toolbar_width = MulDiv(NAV_BUTTON_WIDTH * 3, dpi, USER_DEFAULT_SCREEN_DPI);
+    int path_left = toolbar_width + MulDiv(16, dpi, USER_DEFAULT_SCREEN_DPI);
     RECT new_rect;
+
+    MoveWindow(info->nav_toolbar, 8, 6, toolbar_width, info->rebar_height - 12, TRUE);
+    MoveWindow(info->path_box, path_left, 8, max(0, width - path_left - 8), pathbox_height, TRUE);
     new_rect.left = 0;
     new_rect.top = info->rebar_height;
     new_rect.right = width;
@@ -719,6 +758,8 @@ static LRESULT CALLBACK explorer_wnd_proc(HWND hwnd, UINT uMsg, WPARAM wParam, L
         IExplorerBrowser_Release(browser);
         ILFree(info->pidl);
         IImageList_Release(info->icon_list);
+        if (info->nav_icons) ImageList_Destroy(info->nav_icons);
+        if (info->ui_font) DeleteObject(info->ui_font);
         free(info);
         SetWindowLongPtrW(hwnd,EXPLORER_INFO_INDEX,0);
         PostQuitMessage(0);

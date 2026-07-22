@@ -93,7 +93,8 @@ typedef struct
     } HookMsg;
 
     BOOL ole_initialized;
-    LPITEMIDLIST places[5];
+    BOOL custom_places;
+    LPITEMIDLIST places[7];
 } FileOpenDlgInfos;
 
 /***********************************************************************
@@ -133,6 +134,7 @@ typedef struct
 
 #define IDC_TOOLBAR			1
 #define IDC_TOOLBARPLACES               ctl1
+#define IDC_ADDRESS                     0x3651
 
 /***********************************************************************
  * Prototypes for the methods of the IShellBrowserImpl class

@@ -130,10 +130,10 @@ BLUE_INI TEXTFILE
 
 "\r\n; Nonclient metrics\r\n"
 "CaptionFont = Tahoma, 10, bold\r\n"
-"CaptionBarHeight = 25\r\n"
+"CaptionBarHeight = 31\r\n"
 "SmallCaptionFont = Tahoma, 8, bold\r\n"
-"SMCaptionBarHeight = 17\r\n"
-"SMCaptionBarWidth = 17\r\n"
+"SMCaptionBarHeight = 21\r\n"
+"SMCaptionBarWidth = 21\r\n"
 "MenuFont = Tahoma, 8\r\n"
 "StatusFont = Tahoma, 8\r\n"
 "MsgBoxFont = Tahoma, 8\r\n"

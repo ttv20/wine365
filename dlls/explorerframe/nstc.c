@@ -57,6 +57,7 @@ typedef struct {
 
     NSTCSTYLE style;
     NSTCSTYLE2 style2;
+    int default_item_height;
     struct list roots;
 
     INameSpaceTreeControlCustomDraw *customdraw;
@@ -69,7 +70,7 @@ static const DWORD unsupported_styles =
     NSTCS_EMPTYTEXT | NSTCS_ALLOWJUNCTIONS | NSTCS_SHOWTABSBUTTON | NSTCS_SHOWDELETEBUTTON |
     NSTCS_SHOWREFRESHBUTTON | NSTCS_SPRINGEXPAND | NSTCS_RICHTOOLTIP | NSTCS_NOINDENTCHECKS;
 static const DWORD unsupported_styles2 =
-    NSTCS2_INTERRUPTNOTIFICATIONS | NSTCS2_SHOWNULLSPACEMENU | NSTCS2_DISPLAYPADDING |
+    NSTCS2_INTERRUPTNOTIFICATIONS | NSTCS2_SHOWNULLSPACEMENU |
     NSTCS2_DISPLAYPINNEDONLY | NTSCS2_NOSINGLETONAUTOEXPAND | NTSCS2_NEVERINSERTNONENUMERATED;
 
 static inline NSTC2Impl *impl_from_INameSpaceTreeControl2(INameSpaceTreeControl2 *iface)
@@ -474,6 +475,7 @@ static LRESULT create_namespacetree(HWND hWnd, CREATESTRUCTW *crs)
         ERR("Failed to create treeview!\n");
         return HRESULT_FROM_WIN32(GetLastError());
     }
+    This->default_item_height = SendMessageW(This->hwnd_tv, TVM_GETITEMHEIGHT, 0, 0);
 
     treeview_ex_style = TVS_EX_DRAWIMAGEASYNC | TVS_EX_RICHTOOLTIP |
         TVS_EX_DOUBLEBUFFER | TVS_EX_NOSINGLECOLLAPSE;
@@ -1480,6 +1482,15 @@ static HRESULT WINAPI NSTC2_fnSetControlStyle2(INameSpaceTreeControl2* iface,
 {
     NSTC2Impl *This = impl_from_INameSpaceTreeControl2(iface);
     TRACE("%p (%x, %x)\n", This, nstcsMask, nstcsStyle);
+
+    if ((nstcsMask & NSTCS2_DISPLAYPADDING) && This->hwnd_tv)
+    {
+        int height = This->default_item_height;
+
+        if (nstcsStyle & NSTCS2_DISPLAYPADDING)
+            height += MulDiv(8, GetDpiForWindow(This->hwnd_tv), USER_DEFAULT_SCREEN_DPI);
+        SendMessageW(This->hwnd_tv, TVM_SETITEMHEIGHT, height, 0);
+    }
 
     if((nstcsStyle & nstcsMask) & unsupported_styles2)
         FIXME("mask & style (0x%08x) contains unsupported style(s): 0x%08lx\n",
