@@ -30,7 +30,7 @@ concurrency:
 
 jobs:
   build:
-    runs-on: ubuntu-22.04
+    runs-on: [self-hosted, linux, x64]
     timeout-minutes: 360
     env:
       CONFIGURED_UPDATE_URL: ${{ inputs.update_manifest_url || vars.WINE365_UPDATE_MANIFEST_URL }}
@@ -39,11 +39,25 @@ jobs:
       - name: Check out Wine 365
         uses: actions/checkout@v4
 
-      - name: Install Wine build dependencies
+      - name: Install Wine build dependencies when permitted
+        shell: bash
         run: |
-          sudo dpkg --add-architecture i386
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
+          set -euo pipefail
+          if [[ $(id -u) -eq 0 ]]; then
+            elevate=()
+          elif command -v sudo >/dev/null && sudo -n true 2>/dev/null; then
+            elevate=(sudo)
+          else
+            echo "Runner has no root/package-manager access; using preinstalled build dependencies."
+            exit 0
+          fi
+          command -v apt-get >/dev/null || {
+            echo "This automatic dependency step supports apt-based runner containers only." >&2
+            exit 1
+          }
+          "${elevate[@]}" dpkg --add-architecture i386
+          "${elevate[@]}" apt-get update
+          "${elevate[@]}" apt-get install -y --no-install-recommends \
             autoconf bison build-essential ca-certificates flex \
             gcc-mingw-w64-i686 gcc-mingw-w64-x86-64 \
             g++-mingw-w64-i686 g++-mingw-w64-x86-64 \
@@ -57,6 +71,23 @@ jobs:
             libx11-dev libxcomposite-dev libxcursor-dev libxext-dev libxi-dev \
             libxinerama-dev libxkbcommon-dev libxrandr-dev libxrender-dev \
             libxxf86vm-dev ocl-icd-opencl-dev samba-dev unixodbc-dev
+
+      - name: Verify self-hosted build environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          required=(make gcc g++ bison flex i686-w64-mingw32-gcc x86_64-w64-mingw32-gcc python3 tar gzip)
+          missing=()
+          for command in "${required[@]}"; do
+            command -v "$command" >/dev/null || missing+=("$command")
+          done
+          if ((${#missing[@]})); then
+            printf 'Missing runner dependency: %s\n' "${missing[@]}" >&2
+            exit 1
+          fi
+          echo "Runner: $(uname -a)"
+          echo "Available build cores: $(nproc)"
+          df -h .
 
       - name: Select bundle version
         id: version

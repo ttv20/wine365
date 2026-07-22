@@ -86,7 +86,7 @@ The manifest address can later be embedded in a bundle, set in the manager, or s
 4. Uploads the `.run`, SHA-256 file, and update manifest as a CI artifact.
 5. Publishes those files to a GitHub Release for tags named `wine365-v*`.
 
-The workflow can also be run manually with an explicit version and future update URLs.
+The workflow can also be run manually with an explicit version and future update URLs. Builds target a `self-hosted`, `linux`, `x64` runner and wait if no matching runner is online. The workflow does not use Docker or require access to a Docker socket: it runs `configure` and `make` directly. A root runner container can install apt dependencies itself; an unprivileged container must include the listed build dependencies in its image.
 
 ## Removal
 
