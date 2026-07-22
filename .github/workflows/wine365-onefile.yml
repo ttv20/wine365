@@ -58,7 +58,7 @@ jobs:
           "${elevate[@]}" dpkg --add-architecture i386
           "${elevate[@]}" apt-get update
           "${elevate[@]}" apt-get install -y --no-install-recommends \
-            autoconf bison build-essential ca-certificates flex \
+            autoconf bison build-essential ca-certificates flex zstd \
             gcc-mingw-w64-i686 gcc-mingw-w64-x86-64 \
             g++-mingw-w64-i686 g++-mingw-w64-x86-64 \
             libasound2-dev libavcodec-dev libavformat-dev libavutil-dev \
@@ -76,7 +76,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          required=(make gcc g++ bison flex i686-w64-mingw32-gcc x86_64-w64-mingw32-gcc python3 tar gzip)
+          required=(make gcc g++ bison flex i686-w64-mingw32-gcc x86_64-w64-mingw32-gcc python3 tar gzip zstd)
           missing=()
           for command in "${required[@]}"; do
             command -v "$command" >/dev/null || missing+=("$command")
@@ -131,12 +131,22 @@ jobs:
             "${CONFIGURED_UPDATE_URL:-}" \
             "${CONFIGURED_INSTALLER_URL:-}"
 
+      - name: Build WineCharm runner backup
+        run: |
+          set -euo pipefail
+          runner_name="wine365-${{ steps.version.outputs.version }}-x86_64"
+          tools/wine365-manager/packaging/build-winecharm-backup.sh \
+            stage/opt/wine365 \
+            "release/${runner_name}.tar.zst" \
+            "$runner_name"
+
       - name: Upload CI artifact
         uses: actions/upload-artifact@v4
         with:
           name: wine365-${{ steps.version.outputs.version }}-x86_64
           path: |
             release/*.run
+            release/*.tar.zst
             release/*.sha256
             release/*.manifest.json
           if-no-files-found: error
