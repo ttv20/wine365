@@ -4362,6 +4362,85 @@ static void remove_trailing_backslash( OBJECT_ATTRIBUTES *attr, UNICODE_STRING *
     nt_name->Buffer[len - 1] = 0;
 }
 
+static const WCHAR *find_ascii_substring_i( const UNICODE_STRING *name, const char *substring )
+{
+    SIZE_T substring_len = strlen( substring );
+    SIZE_T name_len = name->Length / sizeof(WCHAR);
+    SIZE_T i, j;
+
+    if (substring_len > name_len) return NULL;
+    for (i = 0; i <= name_len - substring_len; i++)
+    {
+        for (j = 0; j < substring_len; j++)
+        {
+            WCHAR left = name->Buffer[i + j];
+            unsigned char right = substring[j];
+
+            if (left >= 'A' && left <= 'Z') left += 'a' - 'A';
+            if (right >= 'A' && right <= 'Z') right += 'a' - 'A';
+            if (left != right) break;
+        }
+        if (j == substring_len) return name->Buffer + i;
+    }
+    return NULL;
+}
+
+/* Click-to-Run presents its VFS files as an overlay on the Office package.
+ * App-V normally supplies that merged view.  For native Office processes,
+ * retry missing Office16 files against the architecture-specific package VFS
+ * while preserving the requested NT object name. */
+static NTSTATUS get_c2r_vfs_unix_name( const OBJECT_ATTRIBUTES *attr, const UNICODE_STRING *name,
+                                       char **unix_name, BOOL open_reparse )
+{
+    static const char marker[] = "\\Microsoft Office\\root\\Office16\\";
+    static const char *replacements[] =
+    {
+        "\\Microsoft Office\\root\\vfs\\ProgramFilesCommonX64\\Microsoft Shared\\Office16\\",
+        "\\Microsoft Office\\root\\vfs\\ProgramFilesCommonX86\\Microsoft Shared\\Office16\\"
+    };
+    const WCHAR *match, *suffix;
+    SIZE_T prefix_len, suffix_len, replacement_len, len;
+    UNICODE_STRING alternate, true_name;
+    OBJECT_ATTRIBUTES alternate_attr;
+    NTSTATUS status = STATUS_OBJECT_NAME_NOT_FOUND;
+    unsigned int i, j;
+
+    if (attr->RootDirectory || !(match = find_ascii_substring_i( name, marker ))) return status;
+
+    prefix_len = match - name->Buffer;
+    suffix = match + strlen(marker);
+    suffix_len = name->Length / sizeof(WCHAR) - (suffix - name->Buffer);
+
+    for (i = 0; i < ARRAY_SIZE(replacements); i++)
+    {
+        replacement_len = strlen( replacements[i] );
+        len = prefix_len + replacement_len + suffix_len;
+        if (len >= 0x7fff / sizeof(WCHAR)) return STATUS_NAME_TOO_LONG;
+        if (!(alternate.Buffer = malloc( (len + 1) * sizeof(WCHAR) ))) return STATUS_NO_MEMORY;
+
+        memcpy( alternate.Buffer, name->Buffer, prefix_len * sizeof(WCHAR) );
+        for (j = 0; j < replacement_len; j++)
+            alternate.Buffer[prefix_len + j] = replacements[i][j];
+        memcpy( alternate.Buffer + prefix_len + replacement_len, suffix, suffix_len * sizeof(WCHAR) );
+        alternate.Buffer[len] = 0;
+        alternate.Length = len * sizeof(WCHAR);
+        alternate.MaximumLength = (len + 1) * sizeof(WCHAR);
+
+        alternate_attr = *attr;
+        alternate_attr.ObjectName = &alternate;
+        alternate_attr.RootDirectory = 0;
+        true_name.Buffer = NULL;
+        status = nt_to_unix_file_name_no_root( &alternate_attr, &true_name, unix_name,
+                                               FILE_OPEN, open_reparse, 0 );
+        if (!status)
+            TRACE( "Click-to-Run VFS redirected %s to %s\n", debugstr_us(name), debugstr_us(&alternate) );
+        free( true_name.Buffer );
+        free( alternate.Buffer );
+        if (!status || status == STATUS_NO_MEMORY) return status;
+    }
+    return status;
+}
+
 /***********************************************************************
  *           get_nt_and_unix_names
  *
@@ -4674,8 +4753,20 @@ NTSTATUS WINAPI NtCreateFile( HANDLE *handle, ACCESS_MASK access, OBJECT_ATTRIBU
         status = file_id_to_unix_file_name( &new_attr, &unix_name, &nt_name );
         if (!status) new_attr.ObjectName = &nt_name;
     }
-    else status = get_nt_and_unix_names( &new_attr, &nt_name, &unix_name, disposition,
-                                         options & FILE_OPEN_REPARSE_POINT );
+    else
+    {
+        status = get_nt_and_unix_names( &new_attr, &nt_name, &unix_name, disposition,
+                                        options & FILE_OPEN_REPARSE_POINT );
+        if (status && disposition == FILE_OPEN &&
+            !(access & (GENERIC_WRITE | GENERIC_ALL | DELETE | WRITE_DAC | WRITE_OWNER |
+                        FILE_WRITE_DATA | FILE_APPEND_DATA | FILE_WRITE_EA | FILE_WRITE_ATTRIBUTES)))
+        {
+            NTSTATUS vfs_status = get_c2r_vfs_unix_name( &new_attr, attr->ObjectName, &unix_name,
+                                                         options & FILE_OPEN_REPARSE_POINT );
+
+            if (!vfs_status || vfs_status == STATUS_NO_MEMORY) status = vfs_status;
+        }
+    }
 
     if (status == STATUS_BAD_DEVICE_TYPE)
     {
@@ -4880,7 +4971,14 @@ NTSTATUS WINAPI NtQueryFullAttributesFile( const OBJECT_ATTRIBUTES *attr,
     UNICODE_STRING nt_name;
     OBJECT_ATTRIBUTES new_attr = *attr;
 
-    if (!(status = get_nt_and_unix_names( &new_attr, &nt_name, &unix_name, FILE_OPEN, TRUE )))
+    status = get_nt_and_unix_names( &new_attr, &nt_name, &unix_name, FILE_OPEN, TRUE );
+    if (status)
+    {
+        NTSTATUS vfs_status = get_c2r_vfs_unix_name( &new_attr, attr->ObjectName, &unix_name, TRUE );
+
+        if (!vfs_status || vfs_status == STATUS_NO_MEMORY) status = vfs_status;
+    }
+    if (!status)
     {
         ULONG attributes;
         struct stat st;
@@ -4909,7 +5007,14 @@ NTSTATUS WINAPI NtQueryAttributesFile( const OBJECT_ATTRIBUTES *attr, FILE_BASIC
     UNICODE_STRING nt_name;
     OBJECT_ATTRIBUTES new_attr = *attr;
 
-    if (!(status = get_nt_and_unix_names( &new_attr, &nt_name, &unix_name, FILE_OPEN, TRUE )))
+    status = get_nt_and_unix_names( &new_attr, &nt_name, &unix_name, FILE_OPEN, TRUE );
+    if (status)
+    {
+        NTSTATUS vfs_status = get_c2r_vfs_unix_name( &new_attr, attr->ObjectName, &unix_name, TRUE );
+
+        if (!vfs_status || vfs_status == STATUS_NO_MEMORY) status = vfs_status;
+    }
+    if (!status)
     {
         ULONG attributes;
         struct stat st;

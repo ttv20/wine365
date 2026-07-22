@@ -7365,6 +7365,82 @@ static void test_file_map_large_size(void)
     DeleteFileA(source);
 }
 
+static void test_c2r_vfs_overlay(void)
+{
+    static const char payload[] = "Click-to-Run VFS resource";
+    char temp[MAX_PATH], base[MAX_PATH], path[MAX_PATH], source[MAX_PATH], requested[MAX_PATH];
+    DWORD written, read, attributes;
+    HANDLE file;
+    BOOL ret;
+
+    if (strcmp( winetest_platform, "wine" ))
+    {
+        skip( "Click-to-Run VFS overlay is a Wine compatibility extension.\n" );
+        return;
+    }
+
+    GetTempPathA( ARRAY_SIZE(temp), temp );
+    GetTempFileNameA( temp, "c2r", 0, base );
+    DeleteFileA( base );
+
+    ret = CreateDirectoryA( base, NULL );
+    ok( ret, "Failed to create %s, error %lu.\n", base, GetLastError() );
+#define CREATE_SUBDIR(suffix) \
+    do { snprintf( path, ARRAY_SIZE(path), "%s%s", base, suffix ); \
+         ret = CreateDirectoryA( path, NULL ); \
+         ok( ret, "Failed to create %s, error %lu.\\n", path, GetLastError() ); } while (0)
+    CREATE_SUBDIR( "\\Microsoft Office" );
+    CREATE_SUBDIR( "\\Microsoft Office\\root" );
+    CREATE_SUBDIR( "\\Microsoft Office\\root\\Office16" );
+    CREATE_SUBDIR( "\\Microsoft Office\\root\\Office16\\1033" );
+    CREATE_SUBDIR( "\\Microsoft Office\\root\\vfs" );
+    CREATE_SUBDIR( "\\Microsoft Office\\root\\vfs\\ProgramFilesCommonX64" );
+    CREATE_SUBDIR( "\\Microsoft Office\\root\\vfs\\ProgramFilesCommonX64\\Microsoft Shared" );
+    CREATE_SUBDIR( "\\Microsoft Office\\root\\vfs\\ProgramFilesCommonX64\\Microsoft Shared\\Office16" );
+    CREATE_SUBDIR( "\\Microsoft Office\\root\\vfs\\ProgramFilesCommonX64\\Microsoft Shared\\Office16\\1033" );
+#undef CREATE_SUBDIR
+
+    snprintf( source, ARRAY_SIZE(source),
+              "%s\\Microsoft Office\\root\\vfs\\ProgramFilesCommonX64\\Microsoft Shared\\Office16\\1033\\resource.bin",
+              base );
+    snprintf( requested, ARRAY_SIZE(requested),
+              "%s\\Microsoft Office\\root\\Office16\\1033\\resource.bin", base );
+    file = CreateFileA( source, GENERIC_WRITE, 0, NULL, CREATE_NEW, 0, NULL );
+    ok( file != INVALID_HANDLE_VALUE, "Failed to create VFS source, error %lu.\n", GetLastError() );
+    ret = WriteFile( file, payload, sizeof(payload), &written, NULL );
+    ok( ret && written == sizeof(payload), "Failed to write VFS source, error %lu.\n", GetLastError() );
+    CloseHandle( file );
+
+    attributes = GetFileAttributesA( requested );
+    ok( attributes != INVALID_FILE_ATTRIBUTES, "VFS attributes failed, error %lu.\n", GetLastError() );
+    file = CreateFileA( requested, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL );
+    ok( file != INVALID_HANDLE_VALUE, "VFS read open failed, error %lu.\n", GetLastError() );
+    memset( path, 0, sizeof(path) );
+    ret = ReadFile( file, path, sizeof(payload), &read, NULL );
+    ok( ret && read == sizeof(payload) && !memcmp( path, payload, sizeof(payload) ),
+        "Unexpected VFS contents, error %lu.\n", GetLastError() );
+    CloseHandle( file );
+
+    file = CreateFileA( requested, GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL );
+    ok( file == INVALID_HANDLE_VALUE, "Writable open unexpectedly reached the immutable VFS source.\n" );
+    if (file != INVALID_HANDLE_VALUE) CloseHandle( file );
+    ret = DeleteFileA( requested );
+    ok( !ret, "Delete unexpectedly reached the immutable VFS source.\n" );
+    ok( GetFileAttributesA( source ) != INVALID_FILE_ATTRIBUTES, "VFS source was removed.\n" );
+
+    DeleteFileA( source );
+    snprintf( path, ARRAY_SIZE(path), "%s\\Microsoft Office\\root\\vfs\\ProgramFilesCommonX64\\Microsoft Shared\\Office16\\1033", base ); RemoveDirectoryA( path );
+    snprintf( path, ARRAY_SIZE(path), "%s\\Microsoft Office\\root\\vfs\\ProgramFilesCommonX64\\Microsoft Shared\\Office16", base ); RemoveDirectoryA( path );
+    snprintf( path, ARRAY_SIZE(path), "%s\\Microsoft Office\\root\\vfs\\ProgramFilesCommonX64\\Microsoft Shared", base ); RemoveDirectoryA( path );
+    snprintf( path, ARRAY_SIZE(path), "%s\\Microsoft Office\\root\\vfs\\ProgramFilesCommonX64", base ); RemoveDirectoryA( path );
+    snprintf( path, ARRAY_SIZE(path), "%s\\Microsoft Office\\root\\vfs", base ); RemoveDirectoryA( path );
+    snprintf( path, ARRAY_SIZE(path), "%s\\Microsoft Office\\root\\Office16\\1033", base ); RemoveDirectoryA( path );
+    snprintf( path, ARRAY_SIZE(path), "%s\\Microsoft Office\\root\\Office16", base ); RemoveDirectoryA( path );
+    snprintf( path, ARRAY_SIZE(path), "%s\\Microsoft Office\\root", base ); RemoveDirectoryA( path );
+    snprintf( path, ARRAY_SIZE(path), "%s\\Microsoft Office", base ); RemoveDirectoryA( path );
+    RemoveDirectoryA( base );
+}
+
 START_TEST(file)
 {
     HMODULE hkernel32 = GetModuleHandleA("kernel32.dll");
@@ -7446,4 +7522,5 @@ START_TEST(file)
     test_mailslot_name();
     test_reparse_points();
     test_file_map_large_size();
+    test_c2r_vfs_overlay();
 }
