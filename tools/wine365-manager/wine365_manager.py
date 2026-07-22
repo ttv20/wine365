@@ -14,7 +14,7 @@ import threading
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
@@ -166,12 +166,49 @@ class Handler(BaseHTTPRequestHandler):
         else:
             self.send_error(404)
 
+    def _upload_and_launch_executable(self) -> None:
+        try:
+            size = int(self.headers.get("Content-Length", "0"))
+        except ValueError as error:
+            raise ValueError("Uploaded EXE has an invalid size.") from error
+        if size <= 0:
+            raise ValueError("Select a non-empty .exe file.")
+        if size > 2 * 1024**3:
+            raise ValueError("Selected EXE is larger than the 2 GiB upload limit.")
+        original = Path(unquote(self.headers.get("X-Wine365-Filename", ""))).name
+        safe_name = "".join(character if character.isalnum() or character in "._-" else "_"
+                            for character in original)
+        if not safe_name.lower().endswith(".exe"):
+            raise ValueError("Only .exe files can be uploaded and launched.")
+        destination_dir = backend.cache_home() / "wine365/installers"
+        destination_dir.mkdir(parents=True, exist_ok=True)
+        destination = destination_dir / f"{secrets.token_hex(8)}-{safe_name}"
+        remaining = size
+        try:
+            with destination.open("xb") as output:
+                while remaining:
+                    chunk = self.rfile.read(min(1024 * 1024, remaining))
+                    if not chunk:
+                        raise ConnectionError("EXE upload ended before all bytes were received.")
+                    output.write(chunk)
+                    remaining -= len(chunk)
+            with self.server.state.lock:
+                config = dict(self.server.state.config)
+            pid = backend.launch_executable(config["prefix"], config["wine"], str(destination))
+        except Exception:
+            destination.unlink(missing_ok=True)
+            raise
+        self._json({"ok": True, "message": f"{original} uploaded and started (PID {pid})."})
+
     def do_POST(self) -> None:
         path, authorized = self._authorized_path()
         if not authorized:
             self.send_error(404)
             return
         try:
+            if path == "/api/run/upload":
+                self._upload_and_launch_executable()
+                return
             payload = self._payload()
             state = self.server.state
             if path == "/api/config":
@@ -203,6 +240,12 @@ class Handler(BaseHTTPRequestHandler):
                 pid = backend.launch_tool(config["prefix"], config["wine"], str(payload.get("tool", "")))
                 message = "Wine processes stopped." if pid is None else f"Tool started (PID {pid})."
                 self._json({"ok": True, "message": message})
+                return
+            elif path == "/api/run/executable":
+                pid = backend.launch_executable(config["prefix"], config["wine"],
+                                                str(payload.get("executable", "")),
+                                                str(payload.get("arguments", "")))
+                self._json({"ok": True, "message": f"Executable started (PID {pid})."})
                 return
             elif path == "/api/update/start":
                 def update() -> str:

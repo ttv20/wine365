@@ -26,7 +26,7 @@ permissions:
 
 concurrency:
   group: wine365-onefile-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   build:

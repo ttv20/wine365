@@ -107,6 +107,32 @@ touch "$WINEPREFIX/system.reg"
         self.assertEqual((prefix / "keep-me").read_text(), "important")
         self.assertFalse(list(prefix.parent.glob(".*.wine365-backup-*")))
 
+    def test_launches_exe_in_selected_environment_with_arguments(self):
+        prefix = self.home / ".wine365"
+        prefix.mkdir()
+        (prefix / "system.reg").write_text("registry")
+        installer = self.home / "Downloads/Office Setup.exe"
+        installer.parent.mkdir()
+        installer.write_bytes(b"MZ")
+        process = mock.Mock(pid=4321)
+        with mock.patch.object(backend.subprocess, "Popen", return_value=process) as popen:
+            pid = backend.launch_executable(str(prefix), str(self.wine), str(installer),
+                                            '/configure "/home/user/office.xml"')
+        self.assertEqual(pid, 4321)
+        command = popen.call_args.args[0]
+        self.assertEqual(command, [str(self.wine), str(installer), "/configure", "/home/user/office.xml"])
+        self.assertEqual(popen.call_args.kwargs["env"]["WINEPREFIX"], str(prefix))
+
+    def test_executable_launcher_rejects_non_exe(self):
+        prefix = self.home / ".wine365"
+        prefix.mkdir()
+        (prefix / "system.reg").write_text("registry")
+        document = self.home / "Downloads/readme.txt"
+        document.parent.mkdir()
+        document.write_text("not an exe")
+        with self.assertRaisesRegex(ValueError, "Only .exe"):
+            backend.launch_executable(str(prefix), str(self.wine), str(document))
+
     def test_office_detection_and_shortcut_lifecycle(self):
         prefix = self.home / ".wine365"
         office = prefix / "drive_c/Program Files/Microsoft Office/root/Office16"
