@@ -59,7 +59,8 @@ static IConnectionPoint *browser_connection;
 static DWORD browser_connection_cookie;
 static HWND host_window, owner_window;
 static std::string oauth_state, oauth_code, oauth_tenant = "organizations";
-static std::vector<BYTE> pending_saml_post;
+static std::vector<BYTE> pending_auth_post;
+static std::wstring pending_auth_path;
 static bool oauth_error, oauth_cancelled;
 
 static std::string wide_to_utf8(const WCHAR *value)
@@ -703,29 +704,39 @@ static SAFEARRAY *variant_byte_array(VARIANTARG *arg)
     return arg && arg->vt == (VT_ARRAY | VT_UI1) ? arg->parray : NULL;
 }
 
-static bool queue_saml_handoff(const WCHAR *location, VARIANTARG *post_arg)
+static bool queue_auth_handoff(const WCHAR *location, VARIANTARG *post_arg)
 {
+    static const WCHAR login_srf[] = L"https://login.microsoftonline.com/login.srf";
+    static const WCHAR process_auth[] = L"https://login.microsoftonline.com/common/SAS/ProcessAuth";
     static const char saml[] = "SAMLResponse=", relay[] = "RelayState=";
     SAFEARRAY *array = variant_byte_array(post_arg);
     LONG lower, upper;
     BYTE *data = NULL;
-    bool has_saml = false, has_relay = false;
-    if (!location || _wcsicmp(location, L"https://login.microsoftonline.com/login.srf") ||
-        !array || FAILED(SafeArrayGetLBound(array, 1, &lower)) ||
+    bool is_saml, is_process_auth, has_saml = false, has_relay = false;
+
+    if (!location) return false;
+    is_saml = !_wcsicmp(location, login_srf);
+    is_process_auth = !_wcsicmp(location, process_auth);
+    if ((!is_saml && !is_process_auth) || !array ||
+        FAILED(SafeArrayGetLBound(array, 1, &lower)) ||
         FAILED(SafeArrayGetUBound(array, 1, &upper)) || upper < lower ||
         FAILED(SafeArrayAccessData(array, (void **)&data))) return false;
     size_t size = upper - lower + 1;
     if (size && !data[size - 1]) --size;
-    for (size_t i = 0; i < size; ++i)
+    for (size_t i = 0; is_saml && i < size; ++i)
     {
         if (i + sizeof(saml) - 1 <= size && !memcmp(data + i, saml, sizeof(saml) - 1))
             has_saml = true;
         if (i + sizeof(relay) - 1 <= size && !memcmp(data + i, relay, sizeof(relay) - 1))
             has_relay = true;
     }
-    if (has_saml && has_relay) pending_saml_post.assign(data, data + size);
+    if ((is_saml && has_saml && has_relay) || (is_process_auth && size))
+    {
+        pending_auth_post.assign(data, data + size);
+        pending_auth_path = is_saml ? L"/login.srf" : L"/common/SAS/ProcessAuth";
+    }
     SafeArrayUnaccessData(array);
-    if (pending_saml_post.empty()) return false;
+    if (pending_auth_post.empty()) return false;
     PostMessageW(host_window, WM_APP + 2, 0, 0);
     return true;
 }
@@ -824,8 +835,9 @@ public:
     {
         /* DWebBrowserEvents2::BeforeNavigate2 arguments are reversed. Capture
          * the BrokerPlugin URI before MSHTML replaces the unknown protocol
-         * with its HTTP error page.  A federated SAML response is submitted
-         * with WinINet because MSHTML cannot send that login.srf POST intact. */
+         * with its HTTP error page.  Federated SAML and native MFA responses
+         * are submitted with WinINet because MSHTML cannot send these form
+         * streams intact. */
         if (id == 250 && params && params->cArgs >= 7)
         {
             VARIANTARG *arg = &params->rgvarg[5];
@@ -835,7 +847,7 @@ public:
             if (arg->vt == VT_BSTR) location = arg->bstrVal;
             else if (arg->vt == (VT_BYREF | VT_BSTR) && arg->pbstrVal) location = *arg->pbstrVal;
             bool handled = handle_redirect(location);
-            if (!handled) handled = queue_saml_handoff(location, &params->rgvarg[2]);
+            if (!handled) handled = queue_auth_handoff(location, &params->rgvarg[2]);
             if (handled)
             {
                 VARIANTARG *cancel = &params->rgvarg[0];
@@ -951,11 +963,11 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPAR
         resize_browser(hwnd);
         return 0;
     case WM_APP + 2:
-        if (browser && !pending_saml_post.empty())
+        if (browser && !pending_auth_post.empty() && !pending_auth_path.empty())
         {
             std::wstring redirect;
-            if (internet_post_redirect(L"login.microsoftonline.com", L"/login.srf",
-                                       pending_saml_post, redirect))
+            if (internet_post_redirect(L"login.microsoftonline.com", pending_auth_path.c_str(),
+                                       pending_auth_post, redirect))
             {
                 if (!handle_redirect(redirect.c_str()))
                 {
@@ -971,8 +983,9 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPAR
                 oauth_error = true;
                 PostMessageW(hwnd, WM_CLOSE, 1, 0);
             }
-            SecureZeroMemory(pending_saml_post.data(), pending_saml_post.size());
-            pending_saml_post.clear();
+            SecureZeroMemory(pending_auth_post.data(), pending_auth_post.size());
+            pending_auth_post.clear();
+            pending_auth_path.clear();
         }
         return 0;
     case WM_TIMER:

@@ -91,6 +91,7 @@ typedef struct
 {
     cxx_frame_info frame_info;
     BOOL rethrow;
+    BOOL registered;
     INT search_state;
     INT unwind_state;
     EXCEPTION_RECORD *prev_rec;
@@ -380,7 +381,10 @@ static LONG CALLBACK cxx_rethrow_filter(PEXCEPTION_POINTERS eptrs, void *c)
     cxx_catch_ctx *ctx = c;
 
     if (rec->ExceptionCode == CXX_EXCEPTION && !rec->ExceptionInformation[1] && !rec->ExceptionInformation[2])
+    {
+        ctx->rethrow = TRUE;
         return EXCEPTION_EXECUTE_HANDLER;
+    }
 
     FlsSetValue(fls_index, (void*)(DWORD_PTR)ctx->search_state);
     if (rec->ExceptionCode != CXX_EXCEPTION)
@@ -393,8 +397,12 @@ static LONG CALLBACK cxx_rethrow_filter(PEXCEPTION_POINTERS eptrs, void *c)
 static void CALLBACK cxx_catch_cleanup(BOOL normal, void *c)
 {
     cxx_catch_ctx *ctx = c;
-    __CxxUnregisterExceptionObject(&ctx->frame_info, ctx->rethrow);
 
+    if (ctx->registered)
+    {
+        ctx->registered = FALSE;
+        __CxxUnregisterExceptionObject(&ctx->frame_info, ctx->rethrow);
+    }
     FlsSetValue(fls_index, (void*)(DWORD_PTR)ctx->unwind_state);
 }
 
@@ -408,7 +416,9 @@ static void* WINAPI call_catch_block4(EXCEPTION_RECORD *rec)
     void *ret_addr = NULL;
 
     ctx.rethrow = FALSE;
+    ctx.registered = FALSE;
     __CxxRegisterExceptionObject(&ep, &ctx.frame_info);
+    ctx.registered = TRUE;
     ctx.search_state = rec->ExceptionInformation[2];
     ctx.unwind_state = rec->ExceptionInformation[3];
     ctx.prev_rec = prev_rec;

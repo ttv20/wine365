@@ -3037,7 +3037,6 @@ static NTSTATUS map_image_into_view( struct file_view *view, const UNICODE_STRIN
     IMAGE_DATA_DIRECTORY *imports, *dir;
     NTSTATUS status = STATUS_CONFLICTING_ADDRESSES;
     int i;
-    off_t pos;
     struct stat st;
     char *header_end;
     char *ptr = view->base;
@@ -3103,10 +3102,11 @@ static NTSTATUS map_image_into_view( struct file_view *view, const UNICODE_STRIN
 
     /* map all the sections */
 
-    for (i = pos = 0; i < nt->FileHeader.NumberOfSections; i++)
+    for (i = 0; i < nt->FileHeader.NumberOfSections; i++)
     {
         static const SIZE_T sector_align = 0x1ff;
         SIZE_T map_size, file_start, file_size, end;
+        BOOL use_backing;
 
         if (!sec[i].Misc.VirtualSize)
             map_size = ROUND_SIZE( 0, sec[i].SizeOfRawData, align_mask );
@@ -3130,11 +3130,11 @@ static NTSTATUS map_image_into_view( struct file_view *view, const UNICODE_STRIN
         if ((sec[i].Characteristics & IMAGE_SCN_MEM_SHARED) &&
             (sec[i].Characteristics & IMAGE_SCN_MEM_WRITE))
         {
-            TRACE_(module)( "%s mapping shared section %.8s at %p off %x (%x) size %lx (%lx) flags %x\n",
+            TRACE_(module)( "%s mapping shared section %.8s at %p off %x size %lx (%lx) flags %x\n",
                             debugstr_us(nt_name), sec[i].Name, ptr + sec[i].VirtualAddress,
-                            sec[i].PointerToRawData, (int)pos, file_size, map_size,
-                            sec[i].Characteristics );
-            if (map_file_into_view( view, shared_fd, sec[i].VirtualAddress, map_size, pos,
+                            sec[i].PointerToRawData, file_size, map_size, sec[i].Characteristics );
+            if (map_file_into_view( view, shared_fd, sec[i].VirtualAddress, map_size,
+                                    sec[i].VirtualAddress,
                                     VPROT_COMMITTED | VPROT_READ | VPROT_WRITE, FALSE ) != STATUS_SUCCESS)
             {
                 ERR_(module)( "Could not map %s shared section %.8s\n", debugstr_us(nt_name), sec[i].Name );
@@ -3149,11 +3149,9 @@ static NTSTATUS map_image_into_view( struct file_view *view, const UNICODE_STRIN
                 UINT_PTR end = base + ROUND_SIZE( imports->VirtualAddress, imports->Size, host_page_mask );
                 if (end > sec[i].VirtualAddress + map_size) end = sec[i].VirtualAddress + map_size;
                 if (end > base)
-                    map_file_into_view( view, shared_fd, base, end - base,
-                                        pos + (base - sec[i].VirtualAddress),
+                    map_file_into_view( view, shared_fd, base, end - base, base,
                                         VPROT_COMMITTED | VPROT_READ | VPROT_WRITECOPY, FALSE );
             }
-            pos += map_size;
             continue;
         }
 
@@ -3168,12 +3166,15 @@ static NTSTATUS map_image_into_view( struct file_view *view, const UNICODE_STRIN
          *       fall back to read(), so we don't need to check anything here.
          */
         end = file_start + file_size;
+        use_backing = shared_fd != -1 && (file_start & host_page_mask);
         if (sec[i].PointerToRawData >= st.st_size ||
             end > ((st.st_size + sector_align) & ~sector_align) ||
             end < file_start ||
-            map_file_into_view( view, fd, sec[i].VirtualAddress, file_size, file_start,
+            map_file_into_view( view, use_backing ? shared_fd : fd,
+                                sec[i].VirtualAddress, file_size,
+                                use_backing ? sec[i].VirtualAddress : file_start,
                                 VPROT_COMMITTED | VPROT_READ | VPROT_WRITECOPY,
-                                removable ) != STATUS_SUCCESS)
+                                use_backing ? FALSE : removable ) != STATUS_SUCCESS)
         {
             ERR_(module)( "Could not map %s section %.8s, file probably truncated\n",
                           debugstr_us(nt_name), sec[i].Name );
