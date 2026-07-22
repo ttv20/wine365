@@ -18,6 +18,8 @@
  */
 
 #include <stdarg.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "windef.h"
@@ -138,6 +140,7 @@ static struct slc_context *get_slc_context(HSLC handle)
 static BOOL grace_license_present(void); /* defined below with license paths */
 static BOOL o365_proplus_configured(void);
 static const SLID *selected_grace_id(void);
+static const WCHAR *installed_profile_product_info(const WCHAR *name);
 
 static void clear_last_policy(struct slc_context *context)
 {
@@ -240,7 +243,6 @@ static HRESULT build_authentication_result(struct slc_context *context, UINT *si
     BYTE *msg = NULL, *out = NULL, *p;
     BYTE hmac[AUTH_HMAC_LEN];
     BYTE expected[AUTH_HMAC_LEN];
-    DWORD expected_len = 0;
     UINT total;
     BOOL have_expected = FALSE;
 
@@ -252,7 +254,6 @@ static HRESULT build_authentication_result(struct slc_context *context, UINT *si
     if (pending_expected_hmac_len == AUTH_HMAC_LEN)
     {
         memcpy(expected, pending_expected_hmac, AUTH_HMAC_LEN);
-        expected_len = AUTH_HMAC_LEN;
         pending_expected_hmac_len = 0;
         have_expected = TRUE;
     }
@@ -383,13 +384,17 @@ HRESULT WINAPI SLGetProductSkuInformation(HSLC handle, const SLID *product, LPCW
 
     if (IsEqualGUID(product, selected_grace_id()) && grace_license_present())
     {
-        if (!wcsicmp(name, L"Name")) string = o365 ? o365_sku_name : word_sku_name;
-        else if (!wcsicmp(name, L"Description"))
-            string = o365 ? o365_description : word_description;
-        else if (!wcsicmp(name, L"Author")) string = author;
-        else if (!wcsicmp(name, L"ApplicationBitmap"))
-            string = o365 ? o365_application_bitmap : word_application_bitmap;
-        else if (!wcsicmp(name, L"UXDifferentiator")) string = ux_differentiator;
+        string = installed_profile_product_info(name);
+        if (!string)
+        {
+            if (!wcsicmp(name, L"Name")) string = o365 ? o365_sku_name : word_sku_name;
+            else if (!wcsicmp(name, L"Description"))
+                string = o365 ? o365_description : word_description;
+            else if (!wcsicmp(name, L"Author")) string = author;
+            else if (!wcsicmp(name, L"ApplicationBitmap"))
+                string = o365 ? o365_application_bitmap : word_application_bitmap;
+            else if (!wcsicmp(name, L"UXDifferentiator")) string = ux_differentiator;
+        }
     }
 
     if (!string)
@@ -506,6 +511,405 @@ static const struct grace_policy_string o365_grace_string_policies[] =
     { L"office-ApplicationBitmap", L"0x0001F1BB" },
 };
 
+#define OFFICE_LICENSE_ROOT L"C:\\Program Files\\Microsoft Office\\root\\Licenses16\\"
+#define OFFICE_X86_LICENSE_ROOT L"C:\\Program Files (x86)\\Microsoft Office\\root\\Licenses16\\"
+#define MAX_LICENSE_METADATA_SIZE (16 * 1024 * 1024)
+
+struct installed_grace_profile
+{
+    BOOL valid;
+    SLID sku_id;
+    SLID binding_license_id;
+    SLID ul_license_id;
+    SLID ppd_license_id;
+    WCHAR ul_path[MAX_PATH];
+    WCHAR ppd_path[MAX_PATH];
+    WCHAR name[160];
+    WCHAR description[160];
+    WCHAR author[80];
+    WCHAR application_bitmap[32];
+    WCHAR ux_differentiator[64];
+    char *ppd_xml;
+};
+
+static INIT_ONCE installed_profile_once = INIT_ONCE_STATIC_INIT;
+static struct installed_grace_profile installed_profile;
+
+static unsigned int hex_digit(char ch)
+{
+    if (ch >= '0' && ch <= '9') return ch - '0';
+    if (ch >= 'a' && ch <= 'f') return ch - 'a' + 10;
+    if (ch >= 'A' && ch <= 'F') return ch - 'A' + 10;
+    return ~0u;
+}
+
+static BOOL parse_hex(const char **ptr, unsigned int digits, unsigned int *value)
+{
+    unsigned int digit, result = 0, i;
+
+    for (i = 0; i < digits; i++)
+    {
+        if ((digit = hex_digit((*ptr)[i])) > 15) return FALSE;
+        result = (result << 4) | digit;
+    }
+    *ptr += digits;
+    *value = result;
+    return TRUE;
+}
+
+static BOOL parse_slid(const char *text, SLID *id)
+{
+    unsigned int value, i;
+    const char *p = text;
+
+    if (*p == '{') p++;
+    if (!parse_hex(&p, 8, &value)) return FALSE;
+    id->Data1 = value;
+    if (*p++ != '-' || !parse_hex(&p, 4, &value)) return FALSE;
+    id->Data2 = value;
+    if (*p++ != '-' || !parse_hex(&p, 4, &value)) return FALSE;
+    id->Data3 = value;
+    if (*p++ != '-') return FALSE;
+    for (i = 0; i < 2; i++)
+    {
+        if (!parse_hex(&p, 2, &value)) return FALSE;
+        id->Data4[i] = value;
+    }
+    if (*p++ != '-') return FALSE;
+    for (i = 2; i < 8; i++)
+    {
+        if (!parse_hex(&p, 2, &value)) return FALSE;
+        id->Data4[i] = value;
+    }
+    return *p == '}' || !*p || *p == '<' || *p == '"';
+}
+
+/* License metadata is ASCII even when the XRM container is UTF-16.  Preserve
+ * the signed source bytes and only make a read-only ASCII view for lookup. */
+static char *read_ascii_xml(const WCHAR *path, DWORD *size)
+{
+    DWORD file_size, read, i, chars;
+    char *raw, *ascii;
+    HANDLE file;
+
+    file = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
+            OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (file == INVALID_HANDLE_VALUE) return NULL;
+    file_size = GetFileSize(file, NULL);
+    if (file_size == INVALID_FILE_SIZE || !file_size || file_size > MAX_LICENSE_METADATA_SIZE ||
+        !(raw = LocalAlloc(LMEM_FIXED, file_size + 1)))
+    {
+        CloseHandle(file);
+        return NULL;
+    }
+    if (!ReadFile(file, raw, file_size, &read, NULL) || read != file_size)
+    {
+        LocalFree(raw);
+        CloseHandle(file);
+        return NULL;
+    }
+    CloseHandle(file);
+    raw[file_size] = 0;
+
+    if (file_size >= 2 && (((BYTE)raw[0] == 0xff && (BYTE)raw[1] == 0xfe) ||
+                            ((BYTE)raw[0] == 0xfe && (BYTE)raw[1] == 0xff)))
+    {
+        BOOL big_endian = (BYTE)raw[0] == 0xfe;
+
+        chars = (file_size - 2) / 2;
+        if (!(ascii = LocalAlloc(LMEM_FIXED, chars + 1)))
+        {
+            LocalFree(raw);
+            return NULL;
+        }
+        for (i = 0; i < chars; i++)
+        {
+            BYTE low = raw[2 + i * 2 + big_endian];
+            BYTE high = raw[2 + i * 2 + !big_endian];
+            ascii[i] = high ? '?' : low;
+        }
+        ascii[chars] = 0;
+        LocalFree(raw);
+        *size = chars;
+        return ascii;
+    }
+
+    *size = file_size;
+    return raw;
+}
+
+static BOOL span_contains(const char *start, const char *end, const char *needle)
+{
+    const char *found = strstr(start, needle);
+    return found && found + strlen(needle) <= end;
+}
+
+static BOOL copy_ascii_span(const char *start, const char *end, WCHAR *dest, UINT count)
+{
+    UINT length, i;
+
+    if (!start || !end || end < start || (length = end - start) >= count) return FALSE;
+    for (i = 0; i < length; i++) dest[i] = (BYTE)start[i];
+    dest[length] = 0;
+    return TRUE;
+}
+
+static BOOL copy_xml_value(const char *xml, const char *prefix, WCHAR *dest, UINT count)
+{
+    const char *start, *end;
+
+    if (!(start = strstr(xml, prefix))) return FALSE;
+    start += strlen(prefix);
+    if (!(end = strchr(start, '<'))) return FALSE;
+    return copy_ascii_span(start, end, dest, count);
+}
+
+static BOOL append_path(WCHAR *path, UINT count, const WCHAR *suffix)
+{
+    UINT length = lstrlenW(path), suffix_length = lstrlenW(suffix);
+
+    if (length + suffix_length >= count) return FALSE;
+    memcpy(path + length, suffix, (suffix_length + 1) * sizeof(*path));
+    return TRUE;
+}
+
+static BOOL license_map_present(const WCHAR *root)
+{
+    WCHAR path[MAX_PATH];
+
+    lstrcpynW(path, root, ARRAY_SIZE(path));
+    return append_path(path, ARRAY_SIZE(path), L"c2rpridslicensefiles_auto.xml") &&
+           GetFileAttributesW(path) != INVALID_FILE_ATTRIBUTES;
+}
+
+static BOOL get_office_license_root(WCHAR *root, UINT count)
+{
+    static const WCHAR config_key[] = L"Software\\Microsoft\\Office\\ClickToRun\\Configuration";
+    static const WCHAR * const values[] = { L"InstallationPath", L"InstallPath" };
+    static const WCHAR * const fallbacks[] = { OFFICE_LICENSE_ROOT, OFFICE_X86_LICENSE_ROOT };
+    WCHAR installation[MAX_PATH];
+    DWORD size;
+    UINT i, length;
+
+    for (i = 0; i < ARRAY_SIZE(values); i++)
+    {
+        size = sizeof(installation);
+        if (RegGetValueW(HKEY_LOCAL_MACHINE, config_key, values[i], RRF_RT_REG_SZ,
+                NULL, installation, &size)) continue;
+        length = lstrlenW(installation);
+        while (length && (installation[length - 1] == '\\' || installation[length - 1] == '/'))
+            installation[--length] = 0;
+
+        lstrcpynW(root, installation, count);
+        if (append_path(root, count, L"\\root\\Licenses16\\") && license_map_present(root))
+            return TRUE;
+        lstrcpynW(root, installation, count);
+        if (append_path(root, count, L"\\Licenses16\\") && license_map_present(root))
+            return TRUE;
+    }
+
+    for (i = 0; i < ARRAY_SIZE(fallbacks); i++)
+    {
+        lstrcpynW(root, fallbacks[i], count);
+        if (license_map_present(root)) return TRUE;
+    }
+    return FALSE;
+}
+
+static BOOL find_grace_mapping(const char *xml, const char *product_id,
+        SLID *sku_id, WCHAR *ul_name, WCHAR *ppd_name)
+{
+    char product_tag[256];
+    const char *product, *product_end, *license, *license_end;
+    const char *sku, *sku_end, *acid, *file, *file_end, *name, *name_end;
+
+    snprintf(product_tag, sizeof(product_tag), "<ProductReleaseId id=\"%s\">", product_id);
+    if (!(product = strstr(xml, product_tag)) ||
+        !(product_end = strstr(product, "</ProductReleaseId>"))) return FALSE;
+
+    license = product;
+    while ((license = strstr(license, "<License Sku=\"")) && license < product_end)
+    {
+        sku = license + strlen("<License Sku=\"");
+        if (!(sku_end = strchr(sku, '"')) || sku_end >= product_end) return FALSE;
+        if (!(license_end = strstr(sku_end, "</License>")) || license_end > product_end) return FALSE;
+        if (!span_contains(sku, sku_end, "Grace"))
+        {
+            license = license_end + 1;
+            continue;
+        }
+        if (!(acid = strstr(sku_end, " Acid=\"")) || acid >= license_end ||
+            !parse_slid(acid + strlen(" Acid=\""), sku_id))
+        {
+            license = license_end + 1;
+            continue;
+        }
+
+        ul_name[0] = ppd_name[0] = 0;
+        file = sku_end;
+        while ((file = strstr(file, "<File name=\"")) && file < license_end)
+        {
+            name = file + strlen("<File name=\"");
+            if (!(name_end = strchr(name, '"')) || name_end > license_end) return FALSE;
+            file_end = name_end;
+            if (span_contains(name, file_end, "-ul-oob.xrm-ms"))
+                copy_ascii_span(name, file_end, ul_name, MAX_PATH);
+            else if (span_contains(name, file_end, "-ppd.xrm-ms"))
+                copy_ascii_span(name, file_end, ppd_name, MAX_PATH);
+            file = name_end + 1;
+        }
+        if (ul_name[0] && ppd_name[0]) return TRUE;
+        license = license_end + 1;
+    }
+    return FALSE;
+}
+
+static BOOL CALLBACK init_installed_profile(INIT_ONCE *once, void *param, void **context)
+{
+    static const WCHAR config_key[] = L"Software\\Microsoft\\Office\\ClickToRun\\Configuration";
+    WCHAR product_ids[512], license_root[MAX_PATH], map_path[MAX_PATH];
+    WCHAR ul_name[MAX_PATH], ppd_name[MAX_PATH];
+    char product_id[256], *map_xml = NULL, *ul_xml = NULL, *ppd_xml = NULL;
+    const char *token, *private_id;
+    DWORD size = sizeof(product_ids), xml_size;
+    UINT i, length;
+
+    if (RegGetValueW(HKEY_LOCAL_MACHINE, config_key, L"ProductReleaseIds", RRF_RT_REG_SZ,
+            NULL, product_ids, &size) || !get_office_license_root(license_root,
+            ARRAY_SIZE(license_root))) goto done;
+    lstrcpynW(map_path, license_root, ARRAY_SIZE(map_path));
+    if (!append_path(map_path, ARRAY_SIZE(map_path), L"c2rpridslicensefiles_auto.xml") ||
+        !(map_xml = read_ascii_xml(map_path, &xml_size))) goto done;
+
+    for (i = 0; product_ids[i]; )
+    {
+        while (product_ids[i] == ',' || product_ids[i] == ';' || product_ids[i] == ' ') i++;
+        length = 0;
+        while (product_ids[i + length] && product_ids[i + length] != ',' &&
+               product_ids[i + length] != ';' && product_ids[i + length] != ' ') length++;
+        if (!length) break;
+        if (length >= ARRAY_SIZE(product_id)) goto next;
+        for (size = 0; size < length; size++) product_id[size] = product_ids[i + size];
+        product_id[length] = 0;
+
+        if (!find_grace_mapping(map_xml, product_id, &installed_profile.sku_id,
+                ul_name, ppd_name)) goto next;
+        lstrcpynW(installed_profile.ul_path, license_root,
+                ARRAY_SIZE(installed_profile.ul_path));
+        lstrcpynW(installed_profile.ppd_path, license_root,
+                ARRAY_SIZE(installed_profile.ppd_path));
+        if (!append_path(installed_profile.ul_path, ARRAY_SIZE(installed_profile.ul_path), ul_name) ||
+            !append_path(installed_profile.ppd_path, ARRAY_SIZE(installed_profile.ppd_path), ppd_name))
+            goto next;
+        if (!(ul_xml = read_ascii_xml(installed_profile.ul_path, &xml_size)) ||
+            !(ppd_xml = read_ascii_xml(installed_profile.ppd_path, &xml_size))) goto next;
+
+        if (!(token = strstr(ul_xml, "licenseId=\"")) ||
+            !parse_slid(token + strlen("licenseId=\""), &installed_profile.ul_license_id) ||
+            !(private_id = strstr(ul_xml, "privateCertificateId\">")) ||
+            !parse_slid(private_id + strlen("privateCertificateId\">"),
+                    &installed_profile.binding_license_id) ||
+            !(token = strstr(ppd_xml, "licenseId=\"")) ||
+            !parse_slid(token + strlen("licenseId=\""), &installed_profile.ppd_license_id))
+            goto next;
+
+        copy_xml_value(ul_xml, "<tm:infoStr name=\"productName\">",
+                installed_profile.name, ARRAY_SIZE(installed_profile.name));
+        copy_xml_value(ul_xml, "<tm:infoStr name=\"productAuthor\">",
+                installed_profile.author, ARRAY_SIZE(installed_profile.author));
+        copy_xml_value(ul_xml, "<tm:infoStr name=\"ApplicationBitmap\">",
+                installed_profile.application_bitmap,
+                ARRAY_SIZE(installed_profile.application_bitmap));
+        copy_xml_value(ul_xml, "<tm:infoStr name=\"UXDifferentiator\">",
+                installed_profile.ux_differentiator,
+                ARRAY_SIZE(installed_profile.ux_differentiator));
+        lstrcpynW(installed_profile.description, installed_profile.name,
+                ARRAY_SIZE(installed_profile.description));
+        installed_profile.ppd_xml = ppd_xml;
+        ppd_xml = NULL;
+        installed_profile.valid = TRUE;
+        break;
+
+next:
+        LocalFree(ul_xml); ul_xml = NULL;
+        LocalFree(ppd_xml); ppd_xml = NULL;
+        i += length;
+    }
+
+done:
+    LocalFree(map_xml);
+    LocalFree(ul_xml);
+    LocalFree(ppd_xml);
+    return TRUE;
+}
+
+static const struct installed_grace_profile *get_installed_profile(void)
+{
+    InitOnceExecuteOnce(&installed_profile_once, init_installed_profile, NULL, NULL);
+    return installed_profile.valid ? &installed_profile : NULL;
+}
+
+static const WCHAR *installed_profile_product_info(const WCHAR *name)
+{
+    const struct installed_grace_profile *profile = get_installed_profile();
+
+    if (!profile) return NULL;
+    if (!wcsicmp(name, L"Name")) return profile->name[0] ? profile->name : NULL;
+    if (!wcsicmp(name, L"Description"))
+        return profile->description[0] ? profile->description : NULL;
+    if (!wcsicmp(name, L"Author")) return profile->author[0] ? profile->author : NULL;
+    if (!wcsicmp(name, L"ApplicationBitmap"))
+        return profile->application_bitmap[0] ? profile->application_bitmap : NULL;
+    if (!wcsicmp(name, L"UXDifferentiator"))
+        return profile->ux_differentiator[0] ? profile->ux_differentiator : NULL;
+    return NULL;
+}
+
+static BOOL installed_profile_get_policy(const WCHAR *name, SLDATATYPE *type,
+        UINT *size, BYTE **value)
+{
+    const struct installed_grace_profile *profile = get_installed_profile();
+    char ascii_name[192], needle[256];
+    const char *start, *end;
+    WCHAR *string;
+    DWORD *number;
+    UINT i, bytes;
+
+    if (!profile || !profile->ppd_xml || wcslen(name) >= ARRAY_SIZE(ascii_name)) return FALSE;
+    for (i = 0; name[i]; i++)
+    {
+        if (name[i] > 0x7f) return FALSE;
+        ascii_name[i] = name[i];
+    }
+    ascii_name[i] = 0;
+
+    snprintf(needle, sizeof(needle), "<sl:policyInt name=\"%s\">", ascii_name);
+    if ((start = strstr(profile->ppd_xml, needle)))
+    {
+        start += strlen(needle);
+        if (!(end = strchr(start, '<')) || !(number = LocalAlloc(LMEM_FIXED, sizeof(*number))))
+            return FALSE;
+        *number = strtoul(start, NULL, 0);
+        if (type) *type = SL_DATA_DWORD;
+        *size = sizeof(*number);
+        *value = (BYTE *)number;
+        return TRUE;
+    }
+
+    snprintf(needle, sizeof(needle), "<sl:policyStr name=\"%s\">", ascii_name);
+    if (!(start = strstr(profile->ppd_xml, needle))) return FALSE;
+    start += strlen(needle);
+    if (!(end = strchr(start, '<')) || end < start) return FALSE;
+    bytes = (end - start + 1) * sizeof(WCHAR);
+    if (!(string = LocalAlloc(LMEM_FIXED, bytes))) return FALSE;
+    for (i = 0; start + i < end; i++) string[i] = (BYTE)start[i];
+    string[i] = 0;
+    if (type) *type = SL_DATA_SZ;
+    *size = bytes;
+    *value = (BYTE *)string;
+    return TRUE;
+}
+
 static BOOL o365_proplus_configured(void)
 {
     static const WCHAR key_name[] = L"Software\\Microsoft\\Office\\ClickToRun\\Configuration";
@@ -521,12 +925,18 @@ static BOOL o365_proplus_configured(void)
 
 static const SLID *selected_grace_id(void)
 {
+    const struct installed_grace_profile *profile = get_installed_profile();
+    if (profile) return &profile->sku_id;
     return o365_proplus_configured() ? &o365_proplus_grace_id : &word2024_grace_id;
 }
 
 static BOOL grace_license_present(void)
 {
-    const WCHAR *path = o365_proplus_configured() ?
+    const struct installed_grace_profile *profile = get_installed_profile();
+    const WCHAR *path;
+
+    if (profile) path = profile->ul_path;
+    else path = o365_proplus_configured() ?
             o365_proplus_grace_license : word2024_grace_license;
     return GetFileAttributesW(path) != INVALID_FILE_ATTRIBUTES;
 }
@@ -557,8 +967,10 @@ HRESULT WINAPI SLGetPolicyInformation(HSLC handle, LPCWSTR name, SLDATATYPE *typ
         UINT *size, BYTE **value)
 {
     struct slc_context *context = get_slc_context(handle);
+    const struct installed_grace_profile *profile;
     const struct grace_policy_dword *dword_policies;
     const struct grace_policy_string *string_policies;
+    SLDATATYPE profile_type;
     UINT dword_count, string_count, i;
 
     FIXME("(%p, %s, %p, %p, %p) semi-stub\n", handle, debugstr_w(name),
@@ -597,7 +1009,16 @@ HRESULT WINAPI SLGetPolicyInformation(HSLC handle, LPCWSTR name, SLDATATYPE *typ
         return SL_E_VALUE_NOT_FOUND;
     }
 
-    if (grace_license_present())
+    profile = get_installed_profile();
+    if (installed_profile_get_policy(name, type ? type : &profile_type, size, value))
+    {
+        if (context) remember_policy(context, name, type ? *type : profile_type, *value, *size);
+        return S_OK;
+    }
+
+    /* Installed PPD metadata is authoritative. Do not leak fallback Word/O365
+     * privileges into a different dynamically discovered Office SKU. */
+    if (!profile && grace_license_present())
     {
         dword_policies = selected_dword_policies(&dword_count);
         string_policies = selected_string_policies(&string_count);
@@ -660,7 +1081,7 @@ HRESULT WINAPI SLGetPKeyInformation(HSLC handle, const SLID *pkey_id, LPCWSTR na
     if (!get_slc_context(handle) || !pkey_id || !name || !size || !value)
         return E_INVALIDARG;
 
-    if (o365_proplus_configured() ||
+    if (!IsEqualGUID(selected_grace_id(), &word2024_grace_id) ||
         !IsEqualGUID(pkey_id, &word2024_grace_pkey_id) || !grace_license_present())
     {
         if (type) *type = SL_DATA_NONE;
@@ -854,27 +1275,45 @@ static HRESULT read_license_file(const WCHAR *path, UINT *size, BYTE **license)
     return S_OK;
 }
 
-static BOOL buffer_contains_ascii(const BYTE *buf, UINT size, const char *needle)
+static const BYTE *buffer_find_ascii(const BYTE *buf, UINT size, const char *needle)
 {
     UINT nlen, i;
 
-    if (!buf || !needle) return FALSE;
+    if (!buf || !needle) return NULL;
     nlen = (UINT)strlen(needle);
-    if (!nlen || size < nlen) return FALSE;
+    if (!nlen || size < nlen) return NULL;
     for (i = 0; i + nlen <= size; i++)
     {
-        if (!memcmp(buf + i, needle, nlen))
-            return TRUE;
+        if (!memcmp(buf + i, needle, nlen)) return buf + i + nlen;
     }
-    return FALSE;
+    return NULL;
+}
+
+static BOOL buffer_contains_ascii(const BYTE *buf, UINT size, const char *needle)
+{
+    return !!buffer_find_ascii(buf, size, needle);
 }
 
 HRESULT WINAPI SLGetLicenseFileId(HSLC handle, UINT size, const BYTE *license, SLID *file_id)
 {
+    const struct installed_grace_profile *profile = get_installed_profile();
+    const BYTE *id_text;
+    SLID parsed_id;
+
     FIXME("(%p, %u, %p, %p) semi-stub\n", handle, size, license, file_id);
 
     if (!get_slc_context(handle) || !size || !license || !file_id)
         return E_INVALIDARG;
+
+    if (profile && (id_text = buffer_find_ascii(license, size, "licenseId=\"")) &&
+        id_text + 38 <= license + size && parse_slid((const char *)id_text, &parsed_id) &&
+        (IsEqualGUID(&parsed_id, &profile->ul_license_id) ||
+         IsEqualGUID(&parsed_id, &profile->ppd_license_id) ||
+         IsEqualGUID(&parsed_id, &profile->binding_license_id)))
+    {
+        *file_id = parsed_id;
+        return S_OK;
+    }
 
     /* Prefer matching by scanning for known licenseId attributes. */
     if (buffer_contains_ascii(license, size, "{f2faf831-a981-40e0-ac9b-7a372eb4b192}") ||
@@ -904,7 +1343,8 @@ HRESULT WINAPI SLGetLicenseFileId(HSLC handle, UINT size, const BYTE *license, S
 
     if (grace_license_present())
     {
-        *file_id = o365_proplus_configured() ? o365_proplus_grace_ul_license_id :
+        if (profile) *file_id = profile->ul_license_id;
+        else *file_id = o365_proplus_configured() ? o365_proplus_grace_ul_license_id :
                 word2024_grace_ul_license_id;
         return S_OK;
     }
@@ -913,10 +1353,17 @@ HRESULT WINAPI SLGetLicenseFileId(HSLC handle, UINT size, const BYTE *license, S
 
 HRESULT WINAPI SLGetLicense(HSLC handle, const SLID *file_id, UINT *size, BYTE **license)
 {
+    const struct installed_grace_profile *profile = get_installed_profile();
+
     FIXME("(%p, %s, %p, %p) semi-stub\n", handle, wine_dbgstr_guid(file_id), size, license);
 
     if (!get_slc_context(handle) || !file_id || !size || !license)
         return E_INVALIDARG;
+
+    if (profile && IsEqualGUID(file_id, &profile->ul_license_id))
+        return read_license_file(profile->ul_path, size, license);
+    if (profile && IsEqualGUID(file_id, &profile->ppd_license_id))
+        return read_license_file(profile->ppd_path, size, license);
 
     if (IsEqualGUID(file_id, &word2024_grace_ul_license_id) &&
         GetFileAttributesW(word2024_grace_license) != INVALID_FILE_ATTRIBUTES)
@@ -942,9 +1389,11 @@ HRESULT WINAPI SLGetLicense(HSLC handle, const SLID *file_id, UINT *size, BYTE *
 HRESULT WINAPI SLGetSLIDList(HSLC handle, UINT query_type, const SLID *query_id,
         UINT return_type, UINT *count, SLID **ids)
 {
+    const struct installed_grace_profile *profile = get_installed_profile();
     const SLID *grace_id = selected_grace_id();
     const SLID *binding_id, *ul_id;
     BOOL o365 = o365_proplus_configured();
+    BOOL word_pkey;
     SLID *list;
 
     FIXME("(%p, %u, %s, %u, %p, %p) semi-stub\n", handle, query_type,
@@ -960,13 +1409,22 @@ HRESULT WINAPI SLGetSLIDList(HSLC handle, UINT query_type, const SLID *query_id,
         return S_OK;
     }
 
-    binding_id = o365 ? &o365_proplus_grace_binding_license_id :
-            &word2024_grace_binding_license_id;
-    ul_id = o365 ? &o365_proplus_grace_ul_license_id : &word2024_grace_ul_license_id;
+    if (profile)
+    {
+        binding_id = &profile->binding_license_id;
+        ul_id = &profile->ul_license_id;
+    }
+    else
+    {
+        binding_id = o365 ? &o365_proplus_grace_binding_license_id :
+                &word2024_grace_binding_license_id;
+        ul_id = o365 ? &o365_proplus_grace_ul_license_id : &word2024_grace_ul_license_id;
+    }
+    word_pkey = IsEqualGUID(grace_id, &word2024_grace_id);
 
     /* SKU → PKEY: native returns one real product-key SLID.  The captured
-     * product-key ID is specific to Word 2024, so do not expose it for O365. */
-    if (!o365 && return_type == SL_ID_PKEY && query_type == SL_ID_PRODUCT_SKU &&
+     * product-key ID is specific to Word 2024, so do not expose it for other SKUs. */
+    if (word_pkey && return_type == SL_ID_PKEY && query_type == SL_ID_PRODUCT_SKU &&
         query_id && IsEqualGUID(query_id, grace_id))
     {
         if (!(list = LocalAlloc(LMEM_FIXED, sizeof(*list))))
@@ -1053,6 +1511,7 @@ HRESULT WINAPI SLLoadApplicationPolicies(const SLID *app, const SLID *product,
 HRESULT WINAPI SLGetApplicationPolicy(HSLP context, LPCWSTR name, SLDATATYPE *type,
         UINT *size, BYTE **value)
 {
+    const struct installed_grace_profile *profile;
     const struct grace_policy_dword *dword_policies;
     DWORD *installed;
     UINT dword_count, i;
@@ -1096,21 +1555,27 @@ HRESULT WINAPI SLGetApplicationPolicy(HSLP context, LPCWSTR name, SLDATATYPE *ty
     }
 
     /* Grace PPD AppPrivilege / feature flags also surface through application
-     * policy queries during Word startup (before full SPP authentication). */
+     * policy queries during Office startup (before full SPP authentication). */
+    profile = get_installed_profile();
+    if (installed_profile_get_policy(name, type, size, value)) return S_OK;
+
     if (grace_license_present())
     {
-        dword_policies = selected_dword_policies(&dword_count);
-        for (i = 0; i < dword_count; i++)
+        if (!profile)
         {
-            if (!wcsicmp(name, dword_policies[i].name))
+            dword_policies = selected_dword_policies(&dword_count);
+            for (i = 0; i < dword_count; i++)
             {
-                if (!(installed = LocalAlloc(LMEM_FIXED, sizeof(*installed))))
-                    return E_OUTOFMEMORY;
-                *installed = dword_policies[i].value;
-                if (type) *type = SL_DATA_DWORD;
-                *size = sizeof(*installed);
-                *value = (BYTE *)installed;
-                return S_OK;
+                if (!wcsicmp(name, dword_policies[i].name))
+                {
+                    if (!(installed = LocalAlloc(LMEM_FIXED, sizeof(*installed))))
+                        return E_OUTOFMEMORY;
+                    *installed = dword_policies[i].value;
+                    if (type) *type = SL_DATA_DWORD;
+                    *size = sizeof(*installed);
+                    *value = (BYTE *)installed;
+                    return S_OK;
+                }
             }
         }
 
