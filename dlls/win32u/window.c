@@ -2059,6 +2059,41 @@ static int office_caption_button_hittest( HWND hwnd, POINT point, int hittest )
     return hittest;
 }
 
+/* Office sizes RTL NetUI galleries against an effectively unbounded layout,
+ * then falls back to the monitor width if the initial popup does not fit. Keep
+ * the original ribbon anchor and constrain that initial width to the available
+ * work area, so the fallback cannot turn the gallery into a monitor-wide
+ * window. */
+static void constrain_office_net_ui_width( WINDOWPOS *winpos )
+{
+    MONITORINFO monitor;
+    RECT rect;
+    int left, available;
+
+    if ((winpos->flags & SWP_NOSIZE) || winpos->cx <= 0 ||
+        !(NtUserGetWindowLongW( winpos->hwnd, GWL_EXSTYLE ) & WS_EX_LAYOUTRTL) ||
+        !NtUserGetWindowRelative( winpos->hwnd, GW_OWNER ) ||
+        !is_office_net_ui_tool_window( winpos->hwnd ) ||
+        !get_window_rect( winpos->hwnd, &rect, get_thread_dpi() ))
+        return;
+
+    monitor = monitor_info_from_window( winpos->hwnd, MONITOR_DEFAULTTONEAREST );
+    /* Keep the existing ribbon anchor instead of accepting Office's
+     * monitor-wide fallback after its unbounded sizing pass. */
+    if (!(winpos->flags & SWP_NOMOVE) && winpos->x <= monitor.rcWork.left &&
+        (LONGLONG)winpos->x + winpos->cx >= monitor.rcWork.right &&
+        rect.left > monitor.rcWork.left)
+    {
+        winpos->x = rect.left;
+        winpos->cx = monitor.rcWork.right - rect.left;
+        return;
+    }
+
+    left = (winpos->flags & SWP_NOMOVE) ? rect.left : winpos->x;
+    available = monitor.rcWork.right - left;
+    if (available > 0 && winpos->cx > available) winpos->cx = available;
+}
+
 static HWND office_net_ui_yield_window;
 
 static void update_office_net_ui_yield_throttle( HWND hwnd, BOOL visible )
@@ -4040,6 +4075,7 @@ BOOL set_window_pos( WINDOWPOS *winpos, int parent_x, int parent_y )
     BOOL ret = FALSE;
 
     orig_flags = winpos->flags;
+    constrain_office_net_ui_width( winpos );
 
     /* First, check z-order arguments.  */
     if (!(winpos->flags & SWP_NOZORDER))
