@@ -6528,6 +6528,114 @@ static void load_directory_fonts( WCHAR *path, UINT flags )
     NtClose( handle );
 }
 
+static BOOL is_scalable_font_file( const WCHAR *name )
+{
+    const WCHAR *extension = wcsrchr( name, '.' );
+    WCHAR first, second, third;
+
+    if (!extension || !extension[1] || !extension[2] || !extension[3] || extension[4]) return FALSE;
+    first = extension[1] | 0x20;
+    second = extension[2] | 0x20;
+    third = extension[3] | 0x20;
+    return (first == 't' && second == 't' && (third == 'f' || third == 'c')) ||
+           (first == 'o' && second == 't' && third == 'f');
+}
+
+static void load_directory_fonts_recursive( const WCHAR *directory, UINT flags, unsigned int depth )
+{
+    IO_STATUS_BLOCK io = {{0}};
+    OBJECT_ATTRIBUTES attr;
+    UNICODE_STRING nt_name;
+    HANDLE handle;
+    char buf[8192];
+    size_t directory_len = wcslen( directory );
+
+    if (!depth || directory_len > 32760) return;
+    nt_name.Buffer = (WCHAR *)directory;
+    nt_name.MaximumLength = nt_name.Length = directory_len * sizeof(WCHAR);
+    attr.Length = sizeof(attr);
+    attr.RootDirectory = 0;
+    attr.Attributes = OBJ_CASE_INSENSITIVE;
+    attr.ObjectName = &nt_name;
+    attr.SecurityDescriptor = NULL;
+    attr.SecurityQualityOfService = NULL;
+
+    if (NtOpenFile( &handle, GENERIC_READ | SYNCHRONIZE, &attr, &io,
+                    FILE_SHARE_READ | FILE_SHARE_WRITE,
+                    FILE_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT | FILE_OPEN_FOR_BACKUP_INTENT ))
+        return;
+
+    while (!NtQueryDirectoryFile( handle, 0, NULL, NULL, &io, buf, sizeof(buf),
+                                  FileBothDirectoryInformation, FALSE, NULL, FALSE ) && io.Information)
+    {
+        FILE_BOTH_DIR_INFORMATION *info = (FILE_BOTH_DIR_INFORMATION *)buf;
+        for (;;)
+        {
+            size_t name_len = info->FileNameLength / sizeof(WCHAR);
+            WCHAR *path;
+
+            if (!(info->FileAttributes & FILE_ATTRIBUTE_DIRECTORY) ||
+                !((name_len == 1 && info->FileName[0] == '.') ||
+                  (name_len == 2 && info->FileName[0] == '.' && info->FileName[1] == '.')))
+            {
+                if (directory_len + name_len + 1 <= 32767 &&
+                    (path = malloc( (directory_len + name_len + 2) * sizeof(WCHAR) )))
+                {
+                    memcpy( path, directory, directory_len * sizeof(WCHAR) );
+                    path[directory_len] = '\\';
+                    memcpy( path + directory_len + 1, info->FileName, info->FileNameLength );
+                    path[directory_len + name_len + 1] = 0;
+
+                    if ((info->FileAttributes & FILE_ATTRIBUTE_DIRECTORY) &&
+                        !(info->FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT))
+                        load_directory_fonts_recursive( path, flags, depth - 1 );
+                    else if (!(info->FileAttributes & FILE_ATTRIBUTE_DIRECTORY) &&
+                             is_scalable_font_file( path ))
+                        font_funcs->add_font( path, flags );
+                    free( path );
+                }
+            }
+            if (!info->NextEntryOffset) break;
+            info = (FILE_BOTH_DIR_INFORMATION *)((char *)info + info->NextEntryOffset);
+        }
+    }
+    NtClose( handle );
+}
+
+static void load_office_cloud_fonts(void)
+{
+    static const WCHAR shell_foldersW[] =
+        {'S','o','f','t','w','a','r','e','\\','M','i','c','r','o','s','o','f','t','\\',
+         'W','i','n','d','o','w','s','\\','C','u','r','r','e','n','t','V','e','r','s','i','o','n','\\',
+         'E','x','p','l','o','r','e','r','\\','S','h','e','l','l',' ','F','o','l','d','e','r','s'};
+    static const WCHAR cloud_fontsW[] =
+        {'\\','M','i','c','r','o','s','o','f','t','\\','F','o','n','t','C','a','c','h','e',0};
+    char value_buffer[FIELD_OFFSET(KEY_VALUE_PARTIAL_INFORMATION, Data[MAX_PATH * sizeof(WCHAR)])];
+    KEY_VALUE_PARTIAL_INFORMATION *info = (KEY_VALUE_PARTIAL_INFORMATION *)value_buffer;
+    WCHAR path[MAX_PATH], *nt_path;
+    HKEY key;
+    size_t len;
+
+    if (!(key = reg_open_key( hkcu_key, shell_foldersW, sizeof(shell_foldersW) ))) return;
+    if (!query_reg_ascii_value( key, "Local AppData", info, sizeof(value_buffer) ) ||
+        info->Type != REG_SZ || info->DataLength < sizeof(WCHAR))
+    {
+        NtClose( key );
+        return;
+    }
+    len = min( info->DataLength / sizeof(WCHAR), ARRAY_SIZE(path) - 1 );
+    memcpy( path, info->Data, len * sizeof(WCHAR) );
+    path[len] = 0;
+    NtClose( key );
+
+    len = lstrlenW( path );
+    if (len + ARRAY_SIZE(cloud_fontsW) > ARRAY_SIZE(path)) return;
+    lstrcatW( path, cloud_fontsW );
+    if (!(nt_path = get_nt_path( path ))) return;
+    load_directory_fonts_recursive( nt_path, ADDFONT_EXTERNAL_FONT, 8 );
+    free( nt_path );
+}
+
 static void load_file_system_fonts(void)
 {
     char value_buffer[FIELD_OFFSET(KEY_VALUE_PARTIAL_INFORMATION, Data[1024 * sizeof(WCHAR)])];
@@ -6541,6 +6649,10 @@ static void load_file_system_fonts(void)
     /* Wine data directory */
     get_fonts_data_dir_path( NULL, path );
     load_directory_fonts( path, ADDFONT_EXTERNAL_FONT );
+
+    /* Office stores licensed cloud fonts in versioned family subdirectories
+     * below the current user's local application data directory. */
+    load_office_cloud_fonts();
 
     /* custom paths */
     /* @@ Wine registry key: HKCU\Software\Wine\Fonts */
