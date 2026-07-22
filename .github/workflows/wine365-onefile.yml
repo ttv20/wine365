@@ -1,0 +1,122 @@
+name: Build Wine 365 one-file installer
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Bundle version (blank uses the commit)"
+        required: false
+        type: string
+      update_manifest_url:
+        description: "HTTPS update manifest embedded in the install (blank disables updates)"
+        required: false
+        type: string
+      installer_url:
+        description: "HTTPS .run URL written to the generated manifest (blank for now)"
+        required: false
+        type: string
+  push:
+    branches:
+      - main
+    tags:
+      - "wine365-v*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: wine365-onefile-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 360
+    env:
+      WINE365_BUILD_JOBS: "2"
+      CONFIGURED_UPDATE_URL: ${{ inputs.update_manifest_url || vars.WINE365_UPDATE_MANIFEST_URL }}
+      CONFIGURED_INSTALLER_URL: ${{ inputs.installer_url || vars.WINE365_INSTALLER_URL }}
+    steps:
+      - name: Check out Wine 365
+        uses: actions/checkout@v4
+
+      - name: Install Wine build dependencies
+        run: |
+          sudo dpkg --add-architecture i386
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            autoconf bison build-essential ca-certificates flex \
+            gcc-mingw-w64-i686 gcc-mingw-w64-x86-64 \
+            g++-mingw-w64-i686 g++-mingw-w64-x86-64 \
+            libasound2-dev libavcodec-dev libavformat-dev libavutil-dev \
+            libcups2-dev libdbus-1-dev libfontconfig-dev \
+            libfreetype-dev libgl1-mesa-dev libgnutls28-dev libgphoto2-dev \
+            libgstreamer-plugins-base1.0-dev libgstreamer1.0-dev libkrb5-dev \
+            libpcap-dev libpcsclite-dev libpulse-dev libsane-dev libsdl2-dev \
+            libswresample-dev libswscale-dev libudev-dev libunwind-dev \
+            libusb-1.0-0-dev libv4l-dev libvulkan-dev libwayland-dev \
+            libx11-dev libxcomposite-dev libxcursor-dev libxext-dev libxi-dev \
+            libxinerama-dev libxkbcommon-dev libxrandr-dev libxrender-dev \
+            libxxf86vm-dev ocl-icd-opencl-dev samba-dev unixodbc-dev
+
+      - name: Select bundle version
+        id: version
+        shell: bash
+        env:
+          REQUESTED_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          requested=${REQUESTED_VERSION:-}
+          if [[ -n "$requested" ]]; then
+            version=$requested
+          elif [[ $GITHUB_REF == refs/tags/wine365-v* ]]; then
+            version=${GITHUB_REF_NAME#wine365-v}
+          else
+            version="0.0.0-${GITHUB_SHA:0:12}"
+          fi
+          [[ $version =~ ^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$ ]]
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Configure and build Wine 365
+        run: |
+          set -euo pipefail
+          mkdir -p build stage
+          cd build
+          ../configure \
+            --prefix=/opt/wine365 \
+            --enable-archs=i386,x86_64 \
+            --disable-tests
+          make -j"$WINE365_BUILD_JOBS"
+          make DESTDIR="$GITHUB_WORKSPACE/stage" install
+
+      - name: Build self-extracting installer and manifest
+        run: |
+          set -euo pipefail
+          mkdir -p release
+          tools/wine365-manager/packaging/build-onefile.sh \
+            stage/opt/wine365 \
+            release/wine365-${{ steps.version.outputs.version }}-x86_64.run \
+            '${{ steps.version.outputs.version }}' \
+            "${CONFIGURED_UPDATE_URL:-}" \
+            "${CONFIGURED_INSTALLER_URL:-}"
+
+      - name: Upload CI artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wine365-${{ steps.version.outputs.version }}-x86_64
+          path: |
+            release/*.run
+            release/*.sha256
+            release/*.manifest.json
+          if-no-files-found: error
+          compression-level: 0
+
+      - name: Publish tagged GitHub release
+        if: startsWith(github.ref, 'refs/tags/wine365-v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 || \
+            gh release create "$GITHUB_REF_NAME" --verify-tag --generate-notes
+          gh release upload "$GITHUB_REF_NAME" release/* --clobber
