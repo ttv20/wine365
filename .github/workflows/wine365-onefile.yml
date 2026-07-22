@@ -33,7 +33,6 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 360
     env:
-      WINE365_BUILD_JOBS: "2"
       CONFIGURED_UPDATE_URL: ${{ inputs.update_manifest_url || vars.WINE365_UPDATE_MANIFEST_URL }}
       CONFIGURED_INSTALLER_URL: ${{ inputs.installer_url || vars.WINE365_INSTALLER_URL }}
     steps:
@@ -86,7 +85,8 @@ jobs:
             --prefix=/opt/wine365 \
             --enable-archs=i386,x86_64 \
             --disable-tests
-          make -j"$WINE365_BUILD_JOBS"
+          echo "Building with $(nproc) parallel jobs"
+          make -j"$(nproc)"
           make DESTDIR="$GITHUB_WORKSPACE/stage" install
 
       - name: Build self-extracting installer and manifest
