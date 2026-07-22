@@ -19,6 +19,14 @@
 <div class="buttonbar"><button class="primary" onclick="environmentAction('create')">Create environment</button><button class="danger" onclick="recreateEnvironment()">Recreate environment</button><button onclick="launchTool('stop')">Stop Wine processes</button><button onclick="saveConfig()">Save paths</button></div>
 </section>
 
+<section class="card wide"><h2>Run an Office installer or Windows EXE</h2>
+<div class="field"><label for="exe_path">Local EXE path</label><input id="exe_path" type="text" spellcheck="false" placeholder="/home/user/Downloads/OfficeSetup.exe"></div>
+<div class="field"><label for="exe_arguments">Optional arguments</label><input id="exe_arguments" type="text" spellcheck="false" placeholder='Example: /configure "/home/user/office.xml"'></div>
+<input id="exe_file" type="file" accept=".exe,application/vnd.microsoft.portable-executable" hidden onchange="uploadExecutable()">
+<div class="buttonbar"><button class="primary" onclick="runExecutablePath()">Run EXE from path</button><button onclick="$('exe_file').click()">Choose and run EXE…</button></div>
+<p style="color:var(--muted);margin:9px 0 0">The selected executable runs with the Wine 365 runner inside the environment above. Browser-selected files are copied to the local Wine 365 installer cache first.</p>
+</section>
+
 <section class="card wide"><h2>Office shortcuts</h2><div class="apps">
 <label class="app"><input class="appcheck" value="word" type="checkbox"><span><span class="appname">Word</span><br><span id="installed-word" class="installed">Not detected</span></span></label>
 <label class="app"><input class="appcheck" value="excel" type="checkbox"><span><span class="appname">Excel</span><br><span id="installed-excel" class="installed">Not detected</span></span></label>
@@ -53,6 +61,8 @@ function selected(){return [...document.querySelectorAll('.appcheck:checked')].m
 async function shortcutAction(action){const apps=selected();if(!apps.length){toast('Select at least one Office application.',true);return}try{const r=await api('shortcuts/'+action,{config:config(),apps});toast(r.message)}catch(e){toast(e.message,true)}}
 async function launchSelected(){const apps=selected();if(apps.length!==1){toast('Select exactly one application to launch.',true);return}try{const r=await api('launch/app',{config:config(),app:apps[0]});toast(r.message)}catch(e){toast(e.message,true)}}
 async function launchTool(tool){try{const r=await api('launch/tool',{config:config(),tool});toast(r.message)}catch(e){toast(e.message,true)}}
+async function runExecutablePath(){const executable=$('exe_path').value.trim();if(!executable){toast('Enter the local path to an .exe file.',true);return}try{const r=await api('run/executable',{config:config(),executable,arguments:$('exe_arguments').value});toast(r.message)}catch(e){toast(e.message,true)}}
+async function uploadExecutable(){const input=$('exe_file'),file=input.files[0];if(!file)return;try{await api('config',config());toast('Uploading '+file.name+'…');const response=await fetch(base+'/api/run/upload',{method:'POST',headers:{'Content-Type':'application/octet-stream','X-Wine365-Filename':encodeURIComponent(file.name)},body:file});const value=await response.json();if(!response.ok||!value.ok)throw new Error(value.error||'Upload failed');toast(value.message)}catch(e){toast(e.message,true)}finally{input.value=''}}
 async function environmentAction(action){try{const r=await api('environment/'+action,{config:config()});toast(r.message);poll()}catch(e){toast(e.message,true)}}
 function recreateEnvironment(){const path=$('prefix').value;if(confirm('Recreate '+path+'?\n\nThis permanently removes Office, settings, accounts, and files stored inside that Wine environment. The old environment is restored only if initialization fails.'))environmentAction('recreate')}
 async function startUpdate(){if(!$('update_url').value.trim()){toast('No update address is configured yet.',true);return}if(!confirm('Download, verify, and install the available Wine 365 update?'))return;try{const r=await api('update/start',{config:config()});toast(r.message);poll()}catch(e){toast(e.message,true)}}

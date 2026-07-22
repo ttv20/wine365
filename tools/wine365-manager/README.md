@@ -29,6 +29,7 @@ The manager defaults to:
 ## Features
 
 - Create or rollback-safely recreate a selected Wine prefix.
+- Run an Office installer or any selected `.exe` inside that prefix, either from a host path with arguments or through the browser file picker.
 - Create/update/remove Word, Excel, PowerPoint, and Outlook shortcuts.
 - Optionally copy shortcuts to the visible Desktop.
 - Open Wine Configuration, Registry Editor, Control Panel, File Manager, Command Prompt, Task Manager, and Uninstaller.

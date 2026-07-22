@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import shutil
 import signal
 import subprocess
@@ -335,6 +336,25 @@ def launch_app(prefix_value: str, wine_value: str, app: str, helper: Path | None
         raise FileNotFoundError(f"{APP_META[app]['exe']} is not installed in {prefix}")
     register_cloud_fonts(prefix, wine, helper)
     process = subprocess.Popen([str(wine), str(executable), *documents], env=wine_environment(prefix, wine),
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                               start_new_session=True)
+    return process.pid
+
+
+def launch_executable(prefix_value: str, wine_value: str, executable_value: str,
+                      arguments: str | Iterable[str] = ()) -> int:
+    prefix = validate_prefix(prefix_value)
+    if not (prefix / "system.reg").is_file():
+        raise FileNotFoundError(f"Wine environment is not initialized: {prefix}")
+    wine = require_wine(wine_value)
+    executable = normalize_path(executable_value)
+    if not executable.is_file():
+        raise FileNotFoundError(f"Windows executable was not found: {executable}")
+    if executable.suffix.lower() != ".exe":
+        raise ValueError("Only .exe files can be launched from this control.")
+    parsed_arguments = shlex.split(arguments) if isinstance(arguments, str) else list(arguments)
+    process = subprocess.Popen([str(wine), str(executable), *parsed_arguments],
+                               env=wine_environment(prefix, wine),
                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                                start_new_session=True)
     return process.pid
