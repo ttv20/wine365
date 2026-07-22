@@ -22,6 +22,7 @@
 
 #include "windef.h"
 #include "winbase.h"
+#include "winreg.h"
 #include "winternl.h"
 #include "wincrypt.h"
 #include "wine/debug.h"
@@ -33,6 +34,8 @@ WINE_DEFAULT_DEBUG_CHANNEL(slc);
 
 static const SLID word2024_grace_id =
     {0xa2f3ec88, 0x2d6b, 0x4546, {0x87, 0xf1, 0xe7, 0xec, 0x5f, 0x81, 0x8f, 0xa9}};
+static const SLID o365_proplus_grace_id =
+    {0x3ad61e22, 0xe4fe, 0x497f, {0xbd, 0xb1, 0x3e, 0x51, 0xbd, 0x87, 0x21, 0x73}};
 static const SLID office_app_id =
     {0x0ff1ce15, 0xa989, 0x479d, {0xaf, 0x46, 0xf2, 0x75, 0xc6, 0x37, 0x06, 0x63}};
 /* Product-key SLID observed on native Windows for Word 2024 Retail Grace
@@ -52,6 +55,17 @@ static const WCHAR word2024_grace_license[] =
     L"C:\\Program Files\\Microsoft Office\\root\\Licenses16\\Word2024R_Grace-ul-oob.xrm-ms";
 static const WCHAR word2024_grace_ppd_license[] =
     L"C:\\Program Files\\Microsoft Office\\root\\Licenses16\\Word2024R_Grace-ppd.xrm-ms";
+/* IDs and paths published by the Microsoft 365 ProPlus grace license group. */
+static const SLID o365_proplus_grace_binding_license_id =
+    {0x8b085e63, 0x33b5, 0x47dc, {0x80, 0xed, 0x79, 0x67, 0x4f, 0x09, 0x1a, 0x36}};
+static const SLID o365_proplus_grace_ul_license_id =
+    {0x3c42d53b, 0x20c5, 0x42c6, {0x92, 0x79, 0x76, 0x8c, 0xd3, 0x5a, 0xa2, 0x52}};
+static const SLID o365_proplus_grace_ppd_license_id =
+    {0x32757964, 0x6b92, 0xd375, {0x42, 0xe1, 0xfb, 0xbd, 0x7d, 0xa1, 0x64, 0x54}};
+static const WCHAR o365_proplus_grace_license[] =
+    L"C:\\Program Files\\Microsoft Office\\root\\Licenses16\\O365ProPlusR_Grace-ul-oob.xrm-ms";
+static const WCHAR o365_proplus_grace_ppd_license[] =
+    L"C:\\Program Files\\Microsoft Office\\root\\Licenses16\\O365ProPlusR_Grace-ppd.xrm-ms";
 
 #define SLC_CONTEXT_MAGIC 0x534c4343
 #define AUTH_MARKER       0x00010000
@@ -122,6 +136,8 @@ static struct slc_context *get_slc_context(HSLC handle)
 }
 
 static BOOL grace_license_present(void); /* defined below with license paths */
+static BOOL o365_proplus_configured(void);
+static const SLID *selected_grace_id(void);
 
 static void clear_last_policy(struct slc_context *context)
 {
@@ -303,7 +319,7 @@ HRESULT WINAPI SLConsumeRight(HSLC handle, const SLID *app, const SLID *product,
      * After this, aggregate policy "*" must not report RIGHT_NOT_GRANTED or
      * validation ends in 0xC004F013 even when Licenses/status look correct. */
     if (grace_license_present() &&
-        (!product || IsEqualGUID(product, &word2024_grace_id) ||
+        (!product || IsEqualGUID(product, selected_grace_id()) ||
          IsEqualGUID(app, &office_app_id)))
         context->rights_consumed = TRUE;
 
@@ -313,6 +329,7 @@ HRESULT WINAPI SLConsumeRight(HSLC handle, const SLID *app, const SLID *product,
 HRESULT WINAPI SLGetLicensingStatusInformation(HSLC handle, const SLID *app, const SLID *product,
                                                LPCWSTR name, UINT *count, SL_LICENSING_STATUS **status)
 {
+    const SLID *grace_id = selected_grace_id();
     SL_LICENSING_STATUS *entry;
 
     FIXME("(%p %p %p %s %p %p) semi-stub\n", handle, app, product,
@@ -324,10 +341,9 @@ HRESULT WINAPI SLGetLicensingStatusInformation(HSLC handle, const SLID *app, con
     if (!(entry = LocalAlloc(LMEM_FIXED | LMEM_ZEROINIT, sizeof(*entry))))
         return E_OUTOFMEMORY;
 
-    if ((!product || IsEqualGUID(product, &word2024_grace_id)) &&
-        GetFileAttributesW(word2024_grace_license) != INVALID_FILE_ATTRIBUTES)
+    if ((!product || IsEqualGUID(product, grace_id)) && grace_license_present())
     {
-        entry->SkuId = word2024_grace_id;
+        entry->SkuId = *grace_id;
         entry->eStatus = SL_LICENSING_STATUS_IN_GRACE_PERIOD;
         entry->dwGraceTime = 5 * 24 * 60;
         entry->dwTotalGraceDays = 5;
@@ -347,11 +363,15 @@ HRESULT WINAPI SLGetLicensingStatusInformation(HSLC handle, const SLID *app, con
 HRESULT WINAPI SLGetProductSkuInformation(HSLC handle, const SLID *product, LPCWSTR name,
                                           SLDATATYPE *type, UINT *size, BYTE **value)
 {
-    static const WCHAR sku_name[] = L"Office 24, Office24Word2024R_Grace edition";
-    static const WCHAR description[] = L"Office 24, RETAIL(Grace) channel";
+    static const WCHAR word_sku_name[] = L"Office 24, Office24Word2024R_Grace edition";
+    static const WCHAR o365_sku_name[] = L"Office 16, Office16O365ProPlusR_Grace edition";
+    static const WCHAR word_description[] = L"Office 24, RETAIL(Grace) channel";
+    static const WCHAR o365_description[] = L"Office 16, RETAIL(Grace) channel";
     static const WCHAR author[] = L"Microsoft Corporation";
-    static const WCHAR application_bitmap[] = L"0x00000100";
+    static const WCHAR word_application_bitmap[] = L"0x00000100";
+    static const WCHAR o365_application_bitmap[] = L"0x0001F1BB";
     static const WCHAR ux_differentiator[] = L"RETAIL(Grace)";
+    BOOL o365 = o365_proplus_configured();
     const WCHAR *string = NULL;
     UINT bytes;
 
@@ -361,13 +381,14 @@ HRESULT WINAPI SLGetProductSkuInformation(HSLC handle, const SLID *product, LPCW
     if (!handle || !product || !name || !size || !value)
         return E_INVALIDARG;
 
-    if (IsEqualGUID(product, &word2024_grace_id) &&
-        GetFileAttributesW(word2024_grace_license) != INVALID_FILE_ATTRIBUTES)
+    if (IsEqualGUID(product, selected_grace_id()) && grace_license_present())
     {
-        if (!wcsicmp(name, L"Name")) string = sku_name;
-        else if (!wcsicmp(name, L"Description")) string = description;
+        if (!wcsicmp(name, L"Name")) string = o365 ? o365_sku_name : word_sku_name;
+        else if (!wcsicmp(name, L"Description"))
+            string = o365 ? o365_description : word_description;
         else if (!wcsicmp(name, L"Author")) string = author;
-        else if (!wcsicmp(name, L"ApplicationBitmap")) string = application_bitmap;
+        else if (!wcsicmp(name, L"ApplicationBitmap"))
+            string = o365 ? o365_application_bitmap : word_application_bitmap;
         else if (!wcsicmp(name, L"UXDifferentiator")) string = ux_differentiator;
     }
 
@@ -436,16 +457,109 @@ static const struct grace_policy_string grace_string_policies[] =
     { L"office-ApplicationBitmap", L"0x00000100" },
 };
 
+/* Microsoft 365 ProPlus values from O365ProPlusR_Grace-ppd.xrm-ms. */
+static const struct grace_policy_dword o365_grace_dword_policies[] =
+{
+    { L"office-C4ACE6DB-AA99-401F-8BE6-8784BD09F003", 1 },
+    { L"office-E0A76492-0FD5-4EC2-8570-AE1BAA61DC88", 1 },
+    { L"office-DC5CCACD-A7AC-4FD3-9F70-9454B5DE5161", 1 },
+    { L"office-30CAC893-3CA4-494C-A5E9-A99141352216", 1 },
+    { L"office-C7C81382-22F6-4238-B606-1B9A03E30CC2", 1 },
+    { L"office-DisallowPhone", 1 },
+    { L"office-MPC", 2244 },
+    { L"office-DisplayEULA", 1 },
+    { L"office-EulaID", 16 },
+    { L"office-AppPrivilege.LyncPro", 1 },
+    { L"office-AppPrivilege.ProXML", 1 },
+    { L"office-AppPrivilege.ProEE-DRM", 1 },
+    { L"office-AppPrivilege.ProEE-Classify", 1 },
+    { L"office-AppPrivilege.ProEE-BarcodesAndLabels", 1 },
+    { L"office-AppPrivilege.ProEE-Workflow", 1 },
+    { L"office-AppPrivilege.ProSlideLibraryPublish", 1 },
+    { L"office-AppPrivilege.ProOutlookPolicyTags", 1 },
+    { L"office-AppPrivilege.SaveForXLServices", 1 },
+    { L"office-AppPrivilege.GroupPolicySupport", 1 },
+    { L"office-AppPrivilege.BusinessIntelligence", 1 },
+    { L"office-AppPrivilege.CommercialUse", 1 },
+    { L"office-AppPrivilege.OneNotePro", 1 },
+    { L"office-AppPrivilege.PremiumBI", 1 },
+    { L"office-AppPrivilege.IRM", 1 },
+    { L"office-AppPrivilege.PolicyNudge", 1 },
+    { L"office-AppPrivilege.ArchiveMailbox", 1 },
+    { L"office-AppPrivilege.SiteMailbox", 1 },
+    { L"office-AppPrivilege.RetentionPolicies", 1 },
+    { L"office-AppPrivilege.licensing_unknownEnabled", 1 },
+    { L"office-AppPrivilege.licensing_isPaid", 1 },
+    { L"office-AppPrivilege.licensing_isSubscription", 1 },
+    { L"office-AppPrivilege.licensing_isCommercial", 1 },
+    { L"office-AppPrivilege.omex_suppressTMS", 1 },
+    { L"office-AppPrivilege.cxe_whatsnewdialog", 1 },
+    { L"office-AppPrivilege.otel_featureGateSubscriptionAudience", 1 },
+    { L"office-AppPrivilege.otel_featureGateEnterpriseAudience", 1 },
+    { L"office-AppPrivilege.access_enterpriseOnly", 1 },
+    { L"office-AppPrivilege.licensing_runOnNonCloud", 1 },
+};
+
+static const struct grace_policy_string o365_grace_string_policies[] =
+{
+    { L"office-LicenseType", L"Grace" },
+    { L"office-ApplicationBitmap", L"0x0001F1BB" },
+};
+
+static BOOL o365_proplus_configured(void)
+{
+    static const WCHAR key_name[] = L"Software\\Microsoft\\Office\\ClickToRun\\Configuration";
+    WCHAR product_ids[512];
+    DWORD size = sizeof(product_ids);
+
+    if (RegGetValueW(HKEY_LOCAL_MACHINE, key_name, L"ProductReleaseIds", RRF_RT_REG_SZ,
+            NULL, product_ids, &size) || !wcsstr(product_ids, L"O365ProPlusRetail"))
+        return FALSE;
+
+    return TRUE;
+}
+
+static const SLID *selected_grace_id(void)
+{
+    return o365_proplus_configured() ? &o365_proplus_grace_id : &word2024_grace_id;
+}
+
 static BOOL grace_license_present(void)
 {
-    return GetFileAttributesW(word2024_grace_license) != INVALID_FILE_ATTRIBUTES;
+    const WCHAR *path = o365_proplus_configured() ?
+            o365_proplus_grace_license : word2024_grace_license;
+    return GetFileAttributesW(path) != INVALID_FILE_ATTRIBUTES;
+}
+
+static const struct grace_policy_dword *selected_dword_policies(UINT *count)
+{
+    if (o365_proplus_configured())
+    {
+        *count = ARRAY_SIZE(o365_grace_dword_policies);
+        return o365_grace_dword_policies;
+    }
+    *count = ARRAY_SIZE(grace_dword_policies);
+    return grace_dword_policies;
+}
+
+static const struct grace_policy_string *selected_string_policies(UINT *count)
+{
+    if (o365_proplus_configured())
+    {
+        *count = ARRAY_SIZE(o365_grace_string_policies);
+        return o365_grace_string_policies;
+    }
+    *count = ARRAY_SIZE(grace_string_policies);
+    return grace_string_policies;
 }
 
 HRESULT WINAPI SLGetPolicyInformation(HSLC handle, LPCWSTR name, SLDATATYPE *type,
         UINT *size, BYTE **value)
 {
     struct slc_context *context = get_slc_context(handle);
-    UINT i;
+    const struct grace_policy_dword *dword_policies;
+    const struct grace_policy_string *string_policies;
+    UINT dword_count, string_count, i;
 
     FIXME("(%p, %s, %p, %p, %p) semi-stub\n", handle, debugstr_w(name),
             type, size, value);
@@ -485,14 +599,16 @@ HRESULT WINAPI SLGetPolicyInformation(HSLC handle, LPCWSTR name, SLDATATYPE *typ
 
     if (grace_license_present())
     {
-        for (i = 0; i < ARRAY_SIZE(grace_dword_policies); i++)
+        dword_policies = selected_dword_policies(&dword_count);
+        string_policies = selected_string_policies(&string_count);
+        for (i = 0; i < dword_count; i++)
         {
-            if (!wcsicmp(name, grace_dword_policies[i].name))
+            if (!wcsicmp(name, dword_policies[i].name))
             {
                 DWORD *policy;
                 if (!(policy = LocalAlloc(LMEM_FIXED, sizeof(*policy))))
                     return E_OUTOFMEMORY;
-                *policy = grace_dword_policies[i].value;
+                *policy = dword_policies[i].value;
                 if (type) *type = SL_DATA_DWORD;
                 *size = sizeof(*policy);
                 *value = (BYTE *)policy;
@@ -502,11 +618,11 @@ HRESULT WINAPI SLGetPolicyInformation(HSLC handle, LPCWSTR name, SLDATATYPE *typ
             }
         }
 
-        for (i = 0; i < ARRAY_SIZE(grace_string_policies); i++)
+        for (i = 0; i < string_count; i++)
         {
-            if (!wcsicmp(name, grace_string_policies[i].name))
+            if (!wcsicmp(name, string_policies[i].name))
             {
-                const WCHAR *string = grace_string_policies[i].value;
+                const WCHAR *string = string_policies[i].value;
                 UINT bytes = (wcslen(string) + 1) * sizeof(WCHAR);
                 if (!(*value = LocalAlloc(LMEM_FIXED, bytes)))
                     return E_OUTOFMEMORY;
@@ -544,7 +660,8 @@ HRESULT WINAPI SLGetPKeyInformation(HSLC handle, const SLID *pkey_id, LPCWSTR na
     if (!get_slc_context(handle) || !pkey_id || !name || !size || !value)
         return E_INVALIDARG;
 
-    if (!IsEqualGUID(pkey_id, &word2024_grace_pkey_id) || !grace_license_present())
+    if (o365_proplus_configured() ||
+        !IsEqualGUID(pkey_id, &word2024_grace_pkey_id) || !grace_license_present())
     {
         if (type) *type = SL_DATA_NONE;
         *size = 0;
@@ -700,11 +817,6 @@ enum
     SL_ID_ALL_LICENSE_FILES = 6,
 };
 
-static BOOL grace_ppd_license_present(void)
-{
-    return GetFileAttributesW(word2024_grace_ppd_license) != INVALID_FILE_ATTRIBUTES;
-}
-
 static HRESULT read_license_file(const WCHAR *path, UINT *size, BYTE **license)
 {
     HANDLE file;
@@ -777,10 +889,23 @@ HRESULT WINAPI SLGetLicenseFileId(HSLC handle, UINT size, const BYTE *license, S
         *file_id = word2024_grace_ppd_license_id;
         return S_OK;
     }
+    if (buffer_contains_ascii(license, size, "{3c42d53b-20c5-42c6-9279-768cd35aa252}") ||
+        buffer_contains_ascii(license, size, "{3C42D53B-20C5-42C6-9279-768CD35AA252}"))
+    {
+        *file_id = o365_proplus_grace_ul_license_id;
+        return S_OK;
+    }
+    if (buffer_contains_ascii(license, size, "{32757964-6b92-d375-42e1-fbbd7da16454}") ||
+        buffer_contains_ascii(license, size, "{32757964-6B92-D375-42E1-FBBD7DA16454}"))
+    {
+        *file_id = o365_proplus_grace_ppd_license_id;
+        return S_OK;
+    }
 
     if (grace_license_present())
     {
-        *file_id = word2024_grace_ul_license_id;
+        *file_id = o365_proplus_configured() ? o365_proplus_grace_ul_license_id :
+                word2024_grace_ul_license_id;
         return S_OK;
     }
     return SL_E_VALUE_NOT_FOUND;
@@ -793,11 +918,21 @@ HRESULT WINAPI SLGetLicense(HSLC handle, const SLID *file_id, UINT *size, BYTE *
     if (!get_slc_context(handle) || !file_id || !size || !license)
         return E_INVALIDARG;
 
-    if (IsEqualGUID(file_id, &word2024_grace_ul_license_id) && grace_license_present())
+    if (IsEqualGUID(file_id, &word2024_grace_ul_license_id) &&
+        GetFileAttributesW(word2024_grace_license) != INVALID_FILE_ATTRIBUTES)
         return read_license_file(word2024_grace_license, size, license);
 
-    if (IsEqualGUID(file_id, &word2024_grace_ppd_license_id) && grace_ppd_license_present())
+    if (IsEqualGUID(file_id, &word2024_grace_ppd_license_id) &&
+        GetFileAttributesW(word2024_grace_ppd_license) != INVALID_FILE_ATTRIBUTES)
         return read_license_file(word2024_grace_ppd_license, size, license);
+
+    if (IsEqualGUID(file_id, &o365_proplus_grace_ul_license_id) &&
+        GetFileAttributesW(o365_proplus_grace_license) != INVALID_FILE_ATTRIBUTES)
+        return read_license_file(o365_proplus_grace_license, size, license);
+
+    if (IsEqualGUID(file_id, &o365_proplus_grace_ppd_license_id) &&
+        GetFileAttributesW(o365_proplus_grace_ppd_license) != INVALID_FILE_ATTRIBUTES)
+        return read_license_file(o365_proplus_grace_ppd_license, size, license);
 
     *size = 0;
     *license = NULL;
@@ -807,6 +942,9 @@ HRESULT WINAPI SLGetLicense(HSLC handle, const SLID *file_id, UINT *size, BYTE *
 HRESULT WINAPI SLGetSLIDList(HSLC handle, UINT query_type, const SLID *query_id,
         UINT return_type, UINT *count, SLID **ids)
 {
+    const SLID *grace_id = selected_grace_id();
+    const SLID *binding_id, *ul_id;
+    BOOL o365 = o365_proplus_configured();
     SLID *list;
 
     FIXME("(%p, %u, %s, %u, %p, %p) semi-stub\n", handle, query_type,
@@ -822,9 +960,14 @@ HRESULT WINAPI SLGetSLIDList(HSLC handle, UINT query_type, const SLID *query_id,
         return S_OK;
     }
 
-    /* SKU → PKEY: native returns one real product-key SLID. */
-    if (return_type == SL_ID_PKEY && query_type == SL_ID_PRODUCT_SKU &&
-        query_id && IsEqualGUID(query_id, &word2024_grace_id))
+    binding_id = o365 ? &o365_proplus_grace_binding_license_id :
+            &word2024_grace_binding_license_id;
+    ul_id = o365 ? &o365_proplus_grace_ul_license_id : &word2024_grace_ul_license_id;
+
+    /* SKU → PKEY: native returns one real product-key SLID.  The captured
+     * product-key ID is specific to Word 2024, so do not expose it for O365. */
+    if (!o365 && return_type == SL_ID_PKEY && query_type == SL_ID_PRODUCT_SKU &&
+        query_id && IsEqualGUID(query_id, grace_id))
     {
         if (!(list = LocalAlloc(LMEM_FIXED, sizeof(*list))))
             return E_OUTOFMEMORY;
@@ -844,12 +987,12 @@ HRESULT WINAPI SLGetSLIDList(HSLC handle, UINT query_type, const SLID *query_id,
 
     /* SKU → LICENSE: native returns binding + UL-OOB license IDs (not PPD). */
     if (return_type == SL_ID_LICENSE && query_type == SL_ID_PRODUCT_SKU &&
-        query_id && IsEqualGUID(query_id, &word2024_grace_id))
+        query_id && IsEqualGUID(query_id, grace_id))
     {
         if (!(list = LocalAlloc(LMEM_FIXED, 2 * sizeof(*list))))
             return E_OUTOFMEMORY;
-        list[0] = word2024_grace_binding_license_id;
-        list[1] = word2024_grace_ul_license_id;
+        list[0] = *binding_id;
+        list[1] = *ul_id;
         *count = 2;
         *ids = list;
         return S_OK;
@@ -868,7 +1011,7 @@ HRESULT WINAPI SLGetSLIDList(HSLC handle, UINT query_type, const SLID *query_id,
     {
         if (!(list = LocalAlloc(LMEM_FIXED, sizeof(*list))))
             return E_OUTOFMEMORY;
-        *list = word2024_grace_id;
+        *list = *grace_id;
         *count = 1;
         *ids = list;
         return S_OK;
@@ -880,8 +1023,8 @@ HRESULT WINAPI SLGetSLIDList(HSLC handle, UINT query_type, const SLID *query_id,
     {
         if (!(list = LocalAlloc(LMEM_FIXED, 2 * sizeof(*list))))
             return E_OUTOFMEMORY;
-        list[0] = word2024_grace_binding_license_id;
-        list[1] = word2024_grace_ul_license_id;
+        list[0] = *binding_id;
+        list[1] = *ul_id;
         *count = 2;
         *ids = list;
         return S_OK;
@@ -910,8 +1053,9 @@ HRESULT WINAPI SLLoadApplicationPolicies(const SLID *app, const SLID *product,
 HRESULT WINAPI SLGetApplicationPolicy(HSLP context, LPCWSTR name, SLDATATYPE *type,
         UINT *size, BYTE **value)
 {
+    const struct grace_policy_dword *dword_policies;
     DWORD *installed;
-    UINT i;
+    UINT dword_count, i;
 
     FIXME("(%p, %s, %p, %p, %p) semi-stub\n", context, debugstr_w(name),
             type, size, value);
@@ -955,13 +1099,14 @@ HRESULT WINAPI SLGetApplicationPolicy(HSLP context, LPCWSTR name, SLDATATYPE *ty
      * policy queries during Word startup (before full SPP authentication). */
     if (grace_license_present())
     {
-        for (i = 0; i < ARRAY_SIZE(grace_dword_policies); i++)
+        dword_policies = selected_dword_policies(&dword_count);
+        for (i = 0; i < dword_count; i++)
         {
-            if (!wcsicmp(name, grace_dword_policies[i].name))
+            if (!wcsicmp(name, dword_policies[i].name))
             {
                 if (!(installed = LocalAlloc(LMEM_FIXED, sizeof(*installed))))
                     return E_OUTOFMEMORY;
-                *installed = grace_dword_policies[i].value;
+                *installed = dword_policies[i].value;
                 if (type) *type = SL_DATA_DWORD;
                 *size = sizeof(*installed);
                 *value = (BYTE *)installed;
