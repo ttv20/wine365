@@ -1037,11 +1037,9 @@ static GpStatus edge_list_reserve(struct edge_list *edges, size_t count)
     return Ok;
 }
 
-static const REAL RGN_ROUND_OFS = 0.03; /* arbitrary constant found by experiment to be close to native */
-
 static inline INT rgn_round(REAL x)
 {
-    return (INT) ceilf(x - RGN_ROUND_OFS);
+    return (INT) ceilf(x - REGION_SCAN_OFFSET);
 }
 
 static inline void rect_round_from_gp_rect_f(RECT *rc, const GpRectF *rect)
@@ -1085,7 +1083,7 @@ static GpStatus line_to_edge_list(GpPointF p1, GpPointF p2, const RECT *bounds, 
 
     for (y = top_y; y < bottom_y && stat == Ok; y++)
     {
-        REAL x = top_pt.X + (y + RGN_ROUND_OFS - top_pt.Y) * dx / dy;
+        REAL x = top_pt.X + (y + REGION_SCAN_OFFSET - top_pt.Y) * dx / dy;
 
         int rounded_x = rgn_round(x);
 
@@ -1755,8 +1753,8 @@ GpStatus point_in_region(struct region_element *element, REAL x, REAL y, BOOL *r
             return GdipIsVisiblePathPoint(element->elementdata.path, x, y, NULL, res);
         case RegionDataRect:
         {
-            REAL xadj = x + RGN_ROUND_OFS;
-            REAL yadj = y + RGN_ROUND_OFS;
+            REAL xadj = x + REGION_SCAN_OFFSET;
+            REAL yadj = y + REGION_SCAN_OFFSET;
             GpRectF* rc = &element->elementdata.rect;
 
             *res = (xadj >= rc->X && yadj >= rc->Y &&

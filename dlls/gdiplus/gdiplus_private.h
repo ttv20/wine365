@@ -43,6 +43,8 @@
 #define VERSION_MAGIC2 0xdbc01002
 #define VALID_MAGIC(x) (((x) & 0xfffff000) == 0xdbc01000)
 #define TENSION_CONST (0.333333333f)
+/* Arbitrary scan conversion offset found by experiment to be close to native. */
+#define REGION_SCAN_OFFSET (0.03f)
 
 #define GIF_DISPOSE_UNSPECIFIED 0
 #define GIF_DISPOSE_DO_NOT_DISPOSE 1
