@@ -45,7 +45,7 @@ WINE_DEFAULT_DEBUG_CHANNEL(shell);
 #define SV_MIN_WIDTH 150
 #define QUICK_ACCESS_PADDING 8
 #define QUICK_ACCESS_INDENT 16
-#define QUICK_ACCESS_DIVIDER_MARGIN 6
+#define QUICK_ACCESS_DIVIDER_MARGIN 4
 #define QUICK_ACCESS_DIVIDER_HEIGHT 2
 
 #define QUICK_ACCESS_CONTROL_ID 0x3650
@@ -760,22 +760,93 @@ static LRESULT navpane_splitter_endresize(ExplorerBrowserImpl *This, HWND hwnd, 
 static LRESULT navpane_on_wm_create(HWND hwnd, CREATESTRUCTW *crs)
 {
     ExplorerBrowserImpl *This = crs->lpCreateParams;
+    INameSpaceTreeControl2 *pnstc2;
+    DWORD style;
+    HRESULT hr;
 
     TRACE("%p\n", This);
     SetWindowLongPtrW(hwnd, GWLP_USERDATA, (LPARAM)This);
     This->navpane.hwnd_splitter = hwnd;
 
-    create_quick_access(This, GetParent(hwnd));
-    This->navpane.hwnd_divider = CreateWindowExW(0, WC_STATICW, NULL,
-            WS_CHILD | WS_VISIBLE | SS_ETCHEDHORZ, 0, 0, 0, 0, GetParent(hwnd), NULL,
-            shell32_hInstance, NULL);
-    navpane_on_wm_size_move(This);
-    return TRUE;
+    hr = CoCreateInstance(&CLSID_NamespaceTreeControl, NULL, CLSCTX_INPROC_SERVER,
+                          &IID_INameSpaceTreeControl2, (void**)&pnstc2);
+
+    if(SUCCEEDED(hr))
+    {
+        style = NSTCS_HASEXPANDOS | NSTCS_ROOTHASEXPANDO | NSTCS_SHOWSELECTIONALWAYS;
+        hr = INameSpaceTreeControl2_Initialize(pnstc2, GetParent(hwnd), NULL, style);
+        if(SUCCEEDED(hr))
+        {
+            INameSpaceTreeControlEvents *pnstce;
+            IShellFolder *psfdesktop;
+            IShellItem *psi;
+            IOleWindow *pow;
+            LPITEMIDLIST pidl;
+            DWORD cookie, style2 = NSTCS2_DISPLAYPADDING;
+
+            hr = INameSpaceTreeControl2_SetControlStyle2(pnstc2, 0xFF, style2);
+            if(FAILED(hr))
+                ERR("SetControlStyle2 failed (0x%08lx)\n", hr);
+
+            hr = INameSpaceTreeControl2_QueryInterface(pnstc2, &IID_IOleWindow, (void**)&pow);
+            if(SUCCEEDED(hr))
+            {
+                IOleWindow_GetWindow(pow, &This->navpane.hwnd_nstc);
+                IOleWindow_Release(pow);
+            }
+            else
+                ERR("QueryInterface(IOleWindow) failed (0x%08lx)\n", hr);
+
+            pnstce = &This->INameSpaceTreeControlEvents_iface;
+            hr = INameSpaceTreeControl2_TreeAdvise(pnstc2, (IUnknown*)pnstce, &cookie);
+            if(FAILED(hr))
+                ERR("TreeAdvise failed. (0x%08lx).\n", hr);
+
+            hr = SHGetSpecialFolderLocation(NULL, CSIDL_FAVORITES, &pidl);
+            if(SUCCEEDED(hr))
+            {
+                hr = SHCreateShellItem(NULL, NULL, pidl, &psi);
+                if(SUCCEEDED(hr))
+                {
+                    hr = INameSpaceTreeControl2_AppendRoot(pnstc2, psi, SHCONTF_NONFOLDERS, NSTCRS_VISIBLE, NULL);
+                    IShellItem_Release(psi);
+                }
+                ILFree(pidl);
+            }
+
+            SHGetDesktopFolder(&psfdesktop);
+            hr = SHGetItemFromObject((IUnknown*)psfdesktop, &IID_IShellItem, (void**)&psi);
+            IShellFolder_Release(psfdesktop);
+            if(SUCCEEDED(hr))
+            {
+                hr = INameSpaceTreeControl2_AppendRoot(pnstc2, psi, SHCONTF_FOLDERS, NSTCRS_EXPANDED, NULL);
+                IShellItem_Release(psi);
+            }
+
+            This->navpane.pnstc2 = pnstc2;
+            This->navpane.nstc_cookie = cookie;
+            create_quick_access(This, GetParent(hwnd));
+            This->navpane.hwnd_divider = CreateWindowExW(0, WC_STATICW, NULL,
+                    WS_CHILD | WS_VISIBLE | SS_ETCHEDHORZ, 0, 0, 0, 0, GetParent(hwnd), NULL,
+                    shell32_hInstance, NULL);
+            if (This->ui_font)
+            {
+                SendMessageW(This->navpane.hwnd_nstc, WM_SETFONT, (WPARAM)This->ui_font, TRUE);
+                EnumChildWindows(This->navpane.hwnd_nstc, set_ui_font, (LPARAM)This->ui_font);
+            }
+            navpane_on_wm_size_move(This);
+            return TRUE;
+        }
+    }
+
+    This->navpane.pnstc2 = NULL;
+    ERR("Failed (0x%08lx)\n", hr);
+    return FALSE;
 }
 
 static LRESULT navpane_on_wm_size_move(ExplorerBrowserImpl *This)
 {
-    UINT height, width, quick_height, padding, indent, margin, divider_height;
+    UINT height, width, quick_height, padding, indent, margin, divider_height, tree_top;
     int splitter_width = MulDiv(SPLITTER_WIDTH, This->dpix, USER_DEFAULT_SCREEN_DPI);
 
     TRACE("%p\n", This);
@@ -787,9 +858,9 @@ static LRESULT navpane_on_wm_size_move(ExplorerBrowserImpl *This)
     indent = MulDiv(QUICK_ACCESS_INDENT, This->dpix, USER_DEFAULT_SCREEN_DPI);
     margin = MulDiv(QUICK_ACCESS_DIVIDER_MARGIN, This->dpiy, USER_DEFAULT_SCREEN_DPI);
     divider_height = MulDiv(QUICK_ACCESS_DIVIDER_HEIGHT, This->dpiy, USER_DEFAULT_SCREEN_DPI);
-    if (padding + quick_height + margin + divider_height > height)
-        quick_height = height > padding + margin + divider_height ?
-                       height - padding - margin - divider_height : 0;
+    if (padding + quick_height + margin * 2 + divider_height > height)
+        quick_height = height > padding + margin * 2 + divider_height ?
+                       height - padding - margin * 2 - divider_height : 0;
 
     if (This->navpane.hwnd_quick)
     {
@@ -798,10 +869,14 @@ static LRESULT navpane_on_wm_size_move(ExplorerBrowserImpl *This)
         MoveWindow(This->navpane.hwnd_quick, This->navpane.rc.left, This->navpane.rc.top + padding,
                    width, quick_height, TRUE);
     }
+    tree_top = This->navpane.rc.top + padding + quick_height + margin;
     if (This->navpane.hwnd_divider)
-        MoveWindow(This->navpane.hwnd_divider, This->navpane.rc.left + padding,
-                   This->navpane.rc.top + padding + quick_height + margin,
+        MoveWindow(This->navpane.hwnd_divider, This->navpane.rc.left + padding, tree_top,
                    width > padding * 2 ? width - padding * 2 : 0, divider_height, TRUE);
+    tree_top += divider_height + margin;
+    if (This->navpane.hwnd_nstc)
+        MoveWindow(This->navpane.hwnd_nstc, This->navpane.rc.left, tree_top, width,
+                   This->navpane.rc.bottom > tree_top ? This->navpane.rc.bottom - tree_top : 0, TRUE);
 
     return FALSE;
 }
