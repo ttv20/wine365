@@ -155,6 +155,29 @@ touch "$WINEPREFIX/system.reg"
         self.assertEqual(len(removed), 2)
         self.assertFalse(menu.exists())
 
+    def test_outlook_first_run_sets_language_and_safe_launch_options(self):
+        prefix = self.home / ".wine365"
+        office = prefix / "drive_c/Program Files/Microsoft Office/root/Office16"
+        office.mkdir(parents=True)
+        outlook = office / "OUTLOOK.EXE"
+        outlook.write_bytes(b"exe")
+        process = mock.Mock(pid=7654)
+        run_results = [
+            mock.Mock(returncode=1, stdout=""),
+            mock.Mock(returncode=0, stdout="Locale    REG_SZ    0000040d\n"),
+            mock.Mock(returncode=0, stdout=""),
+        ]
+        with mock.patch.object(backend.subprocess, "run", side_effect=run_results) as run, \
+             mock.patch.object(backend.subprocess, "Popen", return_value=process) as popen:
+            pid = backend.launch_app(str(prefix), str(self.wine), "outlook")
+        self.assertEqual(pid, 7654)
+        self.assertEqual(run.call_args_list[2].args[0][-5:],
+                         ["/t", "REG_DWORD", "/d", "1037", "/f"])
+        command = popen.call_args.args[0]
+        self.assertEqual(command, [str(self.wine), str(outlook)])
+        self.assertIn("mshtml=", popen.call_args.kwargs["env"]["WINEDLLOVERRIDES"].split(";"))
+        self.assertNotIn("mshtml=b", popen.call_args.kwargs["env"]["WINEDLLOVERRIDES"].split(";"))
+
     def test_shortcut_removal_does_not_delete_unowned_file(self):
         path = backend.data_home() / "applications/wine365-excel.desktop"
         path.parent.mkdir(parents=True)

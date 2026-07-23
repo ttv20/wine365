@@ -327,6 +327,40 @@ def register_cloud_fonts(prefix: Path, wine: Path, helper: Path | None = None) -
             return
 
 
+def _outlook_environment(env: dict[str, str]) -> dict[str, str]:
+    result = env.copy()
+    overrides = [item for item in result.get("WINEDLLOVERRIDES", "").split(";")
+                 if item and not item.lower().startswith("mshtml=")]
+    overrides.append("mshtml=")
+    result["WINEDLLOVERRIDES"] = ";".join(overrides)
+    return result
+
+
+def prepare_outlook_first_run(prefix: Path, wine: Path, env: dict[str, str]) -> None:
+    outlook_key = r"HKCU\Software\Microsoft\Office\16.0\Outlook"
+    query = subprocess.run(
+        [str(wine), "reg", "query", outlook_key, "/v", "LastUILanguage"],
+        env=env, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+        timeout=30, check=False,
+    )
+    if query.returncode == 0 and "LastUILanguage" in query.stdout:
+        return
+
+    locale_query = subprocess.run(
+        [str(wine), "reg", "query", r"HKCU\Control Panel\International", "/v", "Locale"],
+        env=env, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+        timeout=30, check=False,
+    )
+    match = re.search(r"\b([0-9a-fA-F]{8})\b", locale_query.stdout)
+    lcid = int(match.group(1), 16) if match else 0x0409
+    subprocess.run(
+        [str(wine), "reg", "add", outlook_key, "/v", "LastUILanguage",
+         "/t", "REG_DWORD", "/d", str(lcid), "/f"],
+        env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        timeout=30, check=True,
+    )
+
+
 def launch_app(prefix_value: str, wine_value: str, app: str, helper: Path | None = None,
                documents: Iterable[str] = ()) -> int:
     prefix = validate_prefix(prefix_value)
@@ -335,7 +369,12 @@ def launch_app(prefix_value: str, wine_value: str, app: str, helper: Path | None
     if not executable:
         raise FileNotFoundError(f"{APP_META[app]['exe']} is not installed in {prefix}")
     register_cloud_fonts(prefix, wine, helper)
-    process = subprocess.Popen([str(wine), str(executable), *documents], env=wine_environment(prefix, wine),
+    arguments = list(documents)
+    env = wine_environment(prefix, wine)
+    if app == "outlook":
+        prepare_outlook_first_run(prefix, wine, env)
+        env = _outlook_environment(env)
+    process = subprocess.Popen([str(wine), str(executable), *arguments], env=env,
                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                                start_new_session=True)
     return process.pid
