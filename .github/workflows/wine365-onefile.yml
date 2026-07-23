@@ -16,8 +16,6 @@ on:
         required: false
         type: string
   push:
-    branches:
-      - main
     tags:
       - "wine365-v*"
 
