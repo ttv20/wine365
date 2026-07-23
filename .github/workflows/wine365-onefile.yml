@@ -76,7 +76,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          required=(make gcc g++ bison flex i686-w64-mingw32-gcc x86_64-w64-mingw32-gcc python3 tar gzip zstd)
+          required=(make gcc g++ bison flex i686-w64-mingw32-gcc x86_64-w64-mingw32-gcc python3 tar zstd)
           missing=()
           for command in "${required[@]}"; do
             command -v "$command" >/dev/null || missing+=("$command")
@@ -131,19 +131,47 @@ jobs:
             "${CONFIGURED_UPDATE_URL:-}" \
             "${CONFIGURED_INSTALLER_URL:-}"
 
-      - name: Build WineCharm runner backup
+      - name: Build WineCharm WoW64 runner backup
         run: |
           set -euo pipefail
-          runner_name="wine365-${{ steps.version.outputs.version }}-x86_64"
-          tools/wine365-manager/packaging/build-winecharm-backup.sh \
-            stage/opt/wine365 \
-            "release/${runner_name}.tar.zst" \
-            "$runner_name"
+          runner="stage/opt/wine365"
+          runner_name="wine365-${{ steps.version.outputs.version }}-wow64-x86_64"
+          archive="release/${runner_name}.tar.zst"
+
+          [[ -x "$runner/bin/wine" ]]
+          [[ -d "$runner/lib/wine/i386-windows" ]]
+          [[ -d "$runner/lib/wine/x86_64-windows" ]]
+
+          # WineCharm recognizes this as a combined 64-bit WoW64 runner by its
+          # name and bin/wine64. The staged tree is disposable at this point.
+          rm -f "$runner/bin/wine64"
+          ln -s wine "$runner/bin/wine64"
+
+          # tar --zstd uses zstd's default level (3). Level 19 plus a 128 MiB
+          # window produces a smaller release archive while remaining portable.
+          tar -C "$runner" \
+            --transform="flags=r;s|^\\.|$runner_name|" \
+            -cf - . | zstd -T0 -19 --long=27 --no-progress -o "$archive"
+
+          mapfile -t roots < <(tar --zstd -tf "$archive" | sed 's|/.*||' | sort -u)
+          [[ ${#roots[@]} -eq 1 && ${roots[0]} == "$runner_name" ]]
+          tar --zstd -tf "$archive" | grep -Fx "$runner_name/bin/wine" >/dev/null
+          tar --zstd -tf "$archive" | grep "^$runner_name/lib/wine/i386-windows/" >/dev/null
+          tar --zstd -tf "$archive" | grep "^$runner_name/lib/wine/x86_64-windows/" >/dev/null
+
+          verify_dir=$(mktemp -d)
+          trap 'rm -rf "$verify_dir"' EXIT
+          tar --zstd -xf "$archive" -C "$verify_dir" "$runner_name/bin/wine64"
+          [[ -L "$verify_dir/$runner_name/bin/wine64" ]]
+          [[ $(readlink "$verify_dir/$runner_name/bin/wine64") == wine ]]
+
+          sha256=$(sha256sum "$archive" | awk '{print $1}')
+          printf '%s  %s\n' "$sha256" "$(basename "$archive")" > "$archive.sha256"
 
       - name: Upload CI artifact
         uses: actions/upload-artifact@v4
         with:
-          name: wine365-${{ steps.version.outputs.version }}-x86_64
+          name: wine365-${{ steps.version.outputs.version }}-wow64-x86_64
           path: |
             release/*.run
             release/*.tar.zst

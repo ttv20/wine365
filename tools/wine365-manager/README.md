@@ -59,24 +59,7 @@ The resulting executable supports:
 ./wine365-1.0.0-x86_64.run --uninstall # preserve ~/.wine365
 ```
 
-Installation refuses root and writes below `${XDG_DATA_HOME:-~/.local/share}/wine365`. Runner replacement keeps the previous runner until the new manager installation succeeds.
-
-## WineCharm runner backup
-
-The same GitHub workflow also creates:
-
-```text
-wine365-<version>-x86_64.tar.zst
-wine365-<version>-x86_64.tar.zst.sha256
-```
-
-This follows WineCharm's runner-backup format: one top-level runner directory containing `bin/wine`. It can be selected from WineCharm's **Runner Restore** action. It contains only the prebuilt Wine runner, not a Wine prefix or Microsoft Office.
-
-For packaging tests without compiling Wine:
-
-```bash
-tools/wine365-manager/tests/test_winecharm_backup.sh
-```
+The embedded payload uses Zstandard level 19; `zstd` is required to build or run the bundle. Installation refuses root and writes below `${XDG_DATA_HOME:-~/.local/share}/wine365`. Runner replacement keeps the previous runner until the new manager installation succeeds.
 
 ## Update manifest
 
@@ -100,9 +83,8 @@ The manifest address can later be embedded in a bundle, set in the manager, or s
 1. Builds the merged Wine 365 tree on Ubuntu.
 2. Installs it into a staging directory.
 3. Creates one executable containing Wine and the manager.
-4. Creates a WineCharm-compatible `.tar.zst` runner backup.
-5. Uploads the `.run`, runner backup, checksums, and update manifest as a CI artifact.
-6. Publishes those files to a GitHub Release for tags named `wine365-v*`.
+4. Uploads the release files and checksums as a CI artifact.
+5. Publishes those files to a GitHub Release for tags named `wine365-v*`.
 
 The workflow can also be run manually with an explicit version and future update URLs. Builds target a `self-hosted`, `linux`, `x64` runner and wait if no matching runner is online. The workflow does not use Docker or require access to a Docker socket: it runs `configure` and `make` directly. A root runner container can install apt dependencies itself; an unprivileged container must include the listed build dependencies in its image.
 

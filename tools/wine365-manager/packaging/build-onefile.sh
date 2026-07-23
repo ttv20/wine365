@@ -15,6 +15,7 @@ INSTALLER_URL=${5:-}
 HERE=$(cd "$(dirname "$0")/.." && pwd)
 
 [[ -x "$RUNNER/bin/wine" ]] || { echo "Runner has no executable bin/wine: $RUNNER" >&2; exit 1; }
+command -v zstd >/dev/null || { echo "zstd is required" >&2; exit 1; }
 [[ $VERSION =~ ^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$ ]] || { echo "Unsafe version: $VERSION" >&2; exit 1; }
 if [[ -n $UPDATE_URL && $UPDATE_URL != https://* ]]; then
     echo "Update manifest address must use HTTPS." >&2; exit 1
@@ -32,7 +33,8 @@ tar -C "$HERE" --exclude='tests' --exclude='packaging' --exclude='__pycache__' -
     -cf - . | tar -C "$STAGE/payload/manager" -xf -
 printf '%s\n' "$VERSION" > "$STAGE/payload/VERSION"
 printf '%s\n' "$UPDATE_URL" > "$STAGE/payload/UPDATE_URL"
-tar -C "$STAGE" -czf "$STAGE/payload.tar.gz" payload
+tar -C "$STAGE" -cf - payload | \
+    zstd -T0 -19 --long=27 --no-progress -o "$STAGE/payload.tar.zst"
 
 cat > "$OUTPUT" <<EOF
 #!/bin/sh
@@ -63,12 +65,13 @@ if [ "\$MODE" = --uninstall ]; then
 fi
 [ "\$(id -u)" -ne 0 ] || fail "do not run this installer as root"
 command -v python3 >/dev/null 2>&1 || fail "python3 is required"
+command -v zstd >/dev/null 2>&1 || fail "zstd is required"
 case \$ROOT in "\$HOME"/*) ;; *) fail "install root must be inside your home directory: \$ROOT";; esac
 PAYLOAD_LINE=\$(awk '/^__WINE365_PAYLOAD_BELOW__\$/ { print NR + 1; exit }' "\$0")
 [ -n "\$PAYLOAD_LINE" ] || fail "embedded payload marker is missing"
 if [ "\$MODE" = --extract ]; then
     mkdir -p "\$EXTRACT_DIR"
-    tail -n +"\$PAYLOAD_LINE" "\$0" | tar -xzf - -C "\$EXTRACT_DIR"
+    tail -n +"\$PAYLOAD_LINE" "\$0" | zstd -d -q -c | tar -xf - -C "\$EXTRACT_DIR"
     echo "Extracted Wine 365 \$BUNDLE_VERSION to \$EXTRACT_DIR"
     exit 0
 fi
@@ -85,7 +88,7 @@ trap cleanup EXIT INT TERM
 mkdir -p "\$ROOT"
 mkdir "\$ROOT/.install-lock" 2>/dev/null || fail "another Wine 365 install or update is running"
 LOCK_CREATED=true
-tail -n +"\$PAYLOAD_LINE" "\$0" | tar -xzf - -C "\$TMP"
+tail -n +"\$PAYLOAD_LINE" "\$0" | zstd -d -q -c | tar -xf - -C "\$TMP"
 [ -x "\$TMP/payload/runner/bin/wine" ] || fail "payload runner is invalid"
 VERSION=\$(cat "\$TMP/payload/VERSION")
 UPDATE_URL=\$(cat "\$TMP/payload/UPDATE_URL")
@@ -118,7 +121,7 @@ echo "Open Wine 365 Manager from the application menu."
 exit 0
 __WINE365_PAYLOAD_BELOW__
 EOF
-cat "$STAGE/payload.tar.gz" >> "$OUTPUT"
+cat "$STAGE/payload.tar.zst" >> "$OUTPUT"
 chmod 0755 "$OUTPUT"
 SHA256=$(sha256sum "$OUTPUT" | awk '{print $1}')
 SIZE=$(stat -c '%s' "$OUTPUT")
