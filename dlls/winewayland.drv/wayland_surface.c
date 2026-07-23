@@ -388,6 +388,28 @@ void wayland_surface_set_toplevel_parent(struct wayland_surface *surface,
     xdg_toplevel_set_parent(surface->xdg_toplevel, parent_toplevel);
 }
 
+static BOOL wayland_surface_is_ancestor(struct wayland_surface *surface,
+                                        struct wayland_surface *descendant)
+{
+    struct wayland_win_data *owner_data;
+    unsigned int depth = 0;
+
+    while (descendant && depth++ < 256)
+    {
+        if (descendant == surface) return TRUE;
+        if (!descendant->wl_subsurface || !descendant->owner_hwnd) return FALSE;
+        if (!(owner_data = wayland_win_data_get_nolock(descendant->owner_hwnd))) return FALSE;
+        descendant = owner_data->wayland_surface;
+    }
+
+    if (descendant)
+    {
+        WARN("subsurface owner chain is too deep or cyclic\n");
+        return TRUE;
+    }
+    return FALSE;
+}
+
 /**********************************************************************
  *          wayland_surface_make_subsurface
  *
@@ -398,6 +420,18 @@ void wayland_surface_make_subsurface(struct wayland_surface *surface,
 {
     assert(!surface->role || surface->role == WAYLAND_SURFACE_ROLE_SUBSURFACE);
     if (surface->wl_subsurface && surface->owner_hwnd == owner->hwnd) return;
+
+    /* Win32 popup ownership can change transiently while nested Office UI is
+     * being rearranged. Never mirror a relationship that would make this
+     * surface a child of one of its own Wayland descendants: compositors treat
+     * that wl_subcompositor request as a fatal protocol error. Keep an existing
+     * valid parent until a later WindowPosChanged supplies an acyclic owner. */
+    if (wayland_surface_is_ancestor(surface, owner))
+    {
+        WARN("ignoring cyclic subsurface reparent hwnd=%p owner=%p\n",
+             surface->hwnd, owner->hwnd);
+        return;
+    }
 
     wayland_surface_clear_role(surface);
     surface->role = WAYLAND_SURFACE_ROLE_SUBSURFACE;
