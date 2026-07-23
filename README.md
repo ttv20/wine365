@@ -79,6 +79,29 @@ used by Office. Font generation and licensing details are in
 [`fonts/README.wine365-tahoma-hebrew.md`](fonts/README.wine365-tahoma-hebrew.md)
 and [`fonts/LICENSE.Liberation`](fonts/LICENSE.Liberation).
 
+### Software Protection Platform (SPP/SPPC)
+
+Wine365 implements the `sppc.dll` subset Office Click-to-Run uses for local
+Grace validation, including license status, policy, SLID, license-file, and
+authentication queries. It discovers the installed product instead of exposing
+a fixed SKU:
+
+- `ProductReleaseIds` is read from the Click-to-Run registry configuration;
+- the matching Grace Acid, UL-OOB license, PPD license, product identity, and
+  policies are read from Office's installed `Licenses16` XML/XRM metadata;
+- comma- or semicolon-separated multi-product installations select the first
+  product with a valid Grace mapping;
+- both `Program Files` and `Program Files (x86)` Office installations are
+  supported, and the immutable result is cached once per process.
+
+The metadata-driven path passed local probes for all 76 Grace profiles present
+in the tested Office metadata plus multi-product and fallback cases (80/80).
+Known Word 2024 and Microsoft 365 ProPlus profiles remain as compatibility
+fallbacks. Wine365 does not invent product-key SLIDs for other products and is
+not a general SPP store: volume activation and many other APIs remain stubs.
+SPPC supplies local Office responses; it does not grant a Microsoft 365
+subscription. See [`dlls/sppc/sppc.c`](dlls/sppc/sppc.c).
+
 ### Delivery Optimization
 
 Wine365 exposes Office's legacy Delivery Optimization COM interfaces through
