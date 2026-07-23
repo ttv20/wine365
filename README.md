@@ -1,7 +1,7 @@
 # Wine365
 
 Wine365 is an experimental [Wine](https://www.winehq.org/) fork for running
-modern Microsoft Word on Linux without a Windows virtual machine.
+modern Microsoft Word and Excel on Linux without a Windows virtual machine.
 
 > Every Wine365 investigation, code change, test, and document was produced with
 > AI, primarily **ChatGPT-5.6-sol** and **Grok 4.5**. I directed and tested the
@@ -9,7 +9,8 @@ modern Microsoft Word on Linux without a Windows virtual machine.
 
 ## Important
 
-- **Word is the only Office application that worked in the tested installation.**
+- **Word and Excel were tested. PowerPoint and Outlook open, but were not
+  functionally tested.**
 - Tests ran only on **7th-generation and 12th-generation Intel hardware**.
 - Licensing was tested only with an **organizational Microsoft 365 subscription**.
   KMS, MAK, VL, perpetual, retail, device, shared-computer, and other licensing
@@ -30,8 +31,11 @@ In the tested installation, Word can:
 - sign in and retain Microsoft 365 Apps for enterprise activation after restarts;
 - use RTL-language input, resources, UI, and text rendering.
 
-Word has not been exhaustively tested. These results do not cover every feature,
-file type, add-in, macro, printer, or cloud service.
+Excel was also tested for core workbook editing, formulas, charts, comments,
+CSV import, save/reopen, and print/PDF workflows. VBA has not yet been tested.
+
+Word and Excel have not been exhaustively tested. These results do not cover
+every feature, file type, add-in, macro, printer, or cloud service.
 
 ## Why this will not be submitted to WineHQ
 
@@ -89,6 +93,13 @@ This passed 80/80 probes across 76 metadata profiles and four fallback or
 multi-product cases. Word 2024 and Microsoft 365 ProPlus fallbacks remain;
 volume activation is still stubbed, and SPPC does not grant a subscription.
 See [`dlls/sppc/sppc.c`](dlls/sppc/sppc.c).
+
+### Microsoft 365 subscription licensing
+
+SPP handles local checks; WAM/OneAuth handles the subscription. `wine365auth.exe`
+uses OAuth/PKCE and stores tokens with DPAPI. The tested organizational
+subscription remained activated after restarts. KMS, MAK, VL, perpetual, retail,
+device, shared-computer, and offline activation remain untested.
 
 ### Delivery Optimization
 
