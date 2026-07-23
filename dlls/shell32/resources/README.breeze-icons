@@ -1,0 +1,14 @@
+Breeze icon subset
+==================
+
+The navigation, quick-access, folder, desktop, documents, and home icons in
+this directory are derived without modification from KDE Breeze Icons commit
+f8d528544fae6b014033fb9ff5a9d2b888cb45b4.
+
+Source: https://invent.kde.org/frameworks/breeze-icons
+License: GNU Lesser General Public License version 3 or later
+License text and artwork clarification: COPYING.breeze-icons
+
+The SVG files are the preferred source. The matching ICO files contain
+16, 20, 24, 32, and 48 pixel renderings generated from those SVG files for
+Wine resources.

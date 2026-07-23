@@ -24,6 +24,10 @@
 #include "winerror.h"
 #include "windef.h"
 #include "winbase.h"
+#include "wingdi.h"
+#include "winuser.h"
+#include "commctrl.h"
+#include "knownfolders.h"
 
 #include "wine/list.h"
 #include "wine/debug.h"
@@ -31,13 +35,20 @@
 
 #include "shell32_main.h"
 #include "pidl.h"
+#include "shresdef.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(shell);
 
-#define SPLITTER_WIDTH 2
-#define NP_MIN_WIDTH 60
-#define NP_DEFAULT_WIDTH 150
+#define SPLITTER_WIDTH 4
+#define NP_MIN_WIDTH 160
+#define NP_DEFAULT_WIDTH 200
 #define SV_MIN_WIDTH 150
+#define QUICK_ACCESS_PADDING 8
+#define QUICK_ACCESS_INDENT 16
+#define QUICK_ACCESS_DIVIDER_MARGIN 4
+#define QUICK_ACCESS_DIVIDER_HEIGHT 2
+
+#define QUICK_ACCESS_CONTROL_ID 0x3650
 
 typedef struct _event_client {
     struct list entry;
@@ -66,7 +77,10 @@ typedef struct _ExplorerBrowserImpl {
     RECT splitter_rc;
     struct {
         INameSpaceTreeControl2 *pnstc2;
-        HWND hwnd_splitter, hwnd_nstc;
+        HWND hwnd_splitter, hwnd_nstc, hwnd_quick, hwnd_divider;
+        HIMAGELIST quick_icons;
+        IShellItem *quick_items[5];
+        UINT quick_count, quick_height;
         DWORD nstc_cookie;
         UINT width;
         BOOL show;
@@ -82,7 +96,8 @@ typedef struct _ExplorerBrowserImpl {
     travellog_entry *travellog_cursor;
     int travellog_count;
 
-    int dpix;
+    int dpix, dpiy;
+    HFONT ui_font;
 
     IShellView *psv;
     RECT sv_rc;
@@ -96,6 +111,7 @@ typedef struct _ExplorerBrowserImpl {
 } ExplorerBrowserImpl;
 
 static void initialize_navpane(ExplorerBrowserImpl *This, HWND hwnd_parent, RECT *rc);
+static LRESULT navpane_on_wm_size_move(ExplorerBrowserImpl *This);
 
 /**************************************************************************
  * Event functions.
@@ -270,6 +286,195 @@ static LPCITEMIDLIST travellog_go_forward(ExplorerBrowserImpl *This)
 /**************************************************************************
  * Helper functions
  */
+static BOOL CALLBACK set_ui_font(HWND hwnd, LPARAM font)
+{
+    SendMessageW(hwnd, WM_SETFONT, font, TRUE);
+    return TRUE;
+}
+
+static HFONT create_ui_font(int dpiy)
+{
+    NONCLIENTMETRICSW metrics = { .cbSize = sizeof(metrics) };
+
+    if (!SystemParametersInfoW(SPI_GETNONCLIENTMETRICS, sizeof(metrics), &metrics, 0))
+        return NULL;
+
+    /* Explorer and file-dialog chrome intentionally uses a font two points
+     * larger than the system message font. */
+    metrics.lfMessageFont.lfHeight -= MulDiv(2, dpiy, 72);
+    return CreateFontIndirectW(&metrics.lfMessageFont);
+}
+
+static const struct
+{
+    const KNOWNFOLDERID *folder_id;
+    UINT label_id;
+    UINT icon_id;
+} quick_access_folders[] =
+{
+    { NULL,                IDS_HOME,       IDI_WINE_QUICK_HOME },
+    { &FOLDERID_Documents, IDS_DOCUMENTS,  IDI_WINE_QUICK_DOCUMENTS },
+    { &FOLDERID_Downloads, IDS_DOWNLOADS,  IDI_WINE_QUICK_DOWNLOADS },
+    { &FOLDERID_Pictures,  IDS_MYPICTURES, IDI_WINE_QUICK_PICTURES },
+    { &FOLDERID_Videos,    IDS_MYVIDEOS,   IDI_WINE_QUICK_VIDEOS },
+};
+
+static void quick_access_set_state(HWND hwnd, int index, UINT state, UINT mask)
+{
+    LVITEMW item = { .state = state, .stateMask = mask };
+    SendMessageW(hwnd, LVM_SETITEMSTATE, index, (LPARAM)&item);
+}
+
+static void quick_access_select_current(ExplorerBrowserImpl *This)
+{
+    UINT i;
+
+    if (!This->navpane.hwnd_quick || !This->current_pidl) return;
+
+    quick_access_set_state(This->navpane.hwnd_quick, -1, 0, LVIS_SELECTED | LVIS_FOCUSED);
+    for (i = 0; i < This->navpane.quick_count; ++i)
+    {
+        PIDLIST_ABSOLUTE pidl;
+
+        if (SUCCEEDED(SHGetIDListFromObject((IUnknown *)This->navpane.quick_items[i], &pidl)))
+        {
+            if (ILIsEqual(pidl, This->current_pidl))
+                quick_access_set_state(This->navpane.hwnd_quick, i, LVIS_SELECTED | LVIS_FOCUSED,
+                                       LVIS_SELECTED | LVIS_FOCUSED);
+            ILFree(pidl);
+        }
+    }
+}
+
+static HRESULT get_quick_access_item(unsigned int index, IShellItem **item)
+{
+    const KNOWNFOLDERID *folder_id = quick_access_folders[index].folder_id;
+    PIDLIST_ABSOLUTE pidl;
+    WCHAR *path;
+    DWORD attrs;
+    HRESULT hr;
+
+    *item = NULL;
+    if (!folder_id)
+    {
+        WCHAR username[256], dos_home[MAX_PATH];
+        DWORD len = ARRAY_SIZE(username);
+
+        if (!GetUserNameW(username, &len)) return HRESULT_FROM_WIN32(GetLastError());
+        swprintf(dos_home, ARRAY_SIZE(dos_home), L"Z:\\home\\%s", username);
+        attrs = GetFileAttributesW(dos_home);
+        if (attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY))
+            return SHCreateItemFromParsingName(dos_home, NULL, &IID_IShellItem, (void **)item);
+        return HRESULT_FROM_WIN32(ERROR_PATH_NOT_FOUND);
+    }
+
+    if (FAILED(SHGetKnownFolderPath(folder_id, 0, NULL, &path))) return E_FAIL;
+    attrs = GetFileAttributesW(path);
+    CoTaskMemFree(path);
+    if (attrs == INVALID_FILE_ATTRIBUTES || !(attrs & FILE_ATTRIBUTE_DIRECTORY))
+        return HRESULT_FROM_WIN32(ERROR_PATH_NOT_FOUND);
+    if (FAILED(hr = SHGetKnownFolderIDList(folder_id, 0, NULL, &pidl))) return hr;
+    hr = SHCreateItemFromIDList(pidl, &IID_IShellItem, (void **)item);
+    ILFree(pidl);
+    return hr;
+}
+
+static void create_quick_access(ExplorerBrowserImpl *This, HWND parent)
+{
+    int icon_size = MulDiv(20, This->dpix, USER_DEFAULT_SCREEN_DPI);
+    int indent = MulDiv(QUICK_ACCESS_INDENT, This->dpix, USER_DEFAULT_SCREEN_DPI);
+    LVCOLUMNW column = { .mask = LVCF_WIDTH };
+    unsigned int i;
+
+    This->navpane.hwnd_quick = CreateWindowExW(0, WC_LISTVIEWW, NULL,
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | LVS_REPORT | LVS_NOCOLUMNHEADER |
+            LVS_SINGLESEL | LVS_SHOWSELALWAYS | LVS_NOSCROLL,
+            0, 0, 0, 0, parent, (HMENU)QUICK_ACCESS_CONTROL_ID, shell32_hInstance, NULL);
+    if (!This->navpane.hwnd_quick)
+    {
+        ERR("Failed to create quick-access list: %ld.\n", GetLastError());
+        return;
+    }
+
+    SendMessageW(This->navpane.hwnd_quick, LVM_SETEXTENDEDLISTVIEWSTYLE, 0,
+                 LVS_EX_DOUBLEBUFFER | LVS_EX_FULLROWSELECT | LVS_EX_SUBITEMIMAGES);
+    column.cx = indent;
+    ListView_InsertColumnW(This->navpane.hwnd_quick, 0, &column);
+    column.cx = 0;
+    ListView_InsertColumnW(This->navpane.hwnd_quick, 1, &column);
+    if (This->ui_font) SendMessageW(This->navpane.hwnd_quick, WM_SETFONT, (WPARAM)This->ui_font, TRUE);
+
+    This->navpane.quick_icons = ImageList_Create(icon_size, icon_size, ILC_COLOR32, ARRAY_SIZE(quick_access_folders), 1);
+    if (This->navpane.quick_icons)
+        SendMessageW(This->navpane.hwnd_quick, LVM_SETIMAGELIST, LVSIL_SMALL,
+                     (LPARAM)This->navpane.quick_icons);
+
+    for (i = 0; i < ARRAY_SIZE(quick_access_folders); ++i)
+    {
+        IShellItem *item;
+        WCHAR label[64];
+        LVITEMW list_item = { .mask = LVIF_IMAGE | LVIF_PARAM, .iImage = I_IMAGENONE };
+        LVITEMW content = { .mask = LVIF_TEXT | LVIF_IMAGE, .iSubItem = 1 };
+        HICON icon;
+        int index;
+
+        if (FAILED(get_quick_access_item(i, &item))) continue;
+
+        if (!LoadStringW(shell32_hInstance, quick_access_folders[i].label_id, label, ARRAY_SIZE(label)))
+            label[0] = 0;
+        icon = LoadImageW(shell32_hInstance, MAKEINTRESOURCEW(quick_access_folders[i].icon_id),
+                          IMAGE_ICON, icon_size, icon_size, LR_DEFAULTCOLOR);
+
+        list_item.iItem = This->navpane.quick_count;
+        list_item.lParam = This->navpane.quick_count;
+        content.pszText = label;
+        content.iImage = icon && This->navpane.quick_icons ?
+                         ImageList_AddIcon(This->navpane.quick_icons, icon) : I_IMAGENONE;
+        if (icon) DestroyIcon(icon);
+
+        if ((index = ListView_InsertItemW(This->navpane.hwnd_quick, &list_item)) >= 0)
+        {
+            content.iItem = index;
+            ListView_SetItemW(This->navpane.hwnd_quick, &content);
+            This->navpane.quick_items[This->navpane.quick_count++] = item;
+        }
+        else
+            IShellItem_Release(item);
+    }
+
+    if (This->navpane.quick_count)
+    {
+        RECT item_rect = { .left = LVIR_BOUNDS };
+        if (SendMessageW(This->navpane.hwnd_quick, LVM_GETITEMRECT, 0, (LPARAM)&item_rect))
+            This->navpane.quick_height = (item_rect.bottom - item_rect.top) * This->navpane.quick_count;
+    }
+}
+
+static void destroy_quick_access(ExplorerBrowserImpl *This)
+{
+    UINT i;
+
+    for (i = 0; i < This->navpane.quick_count; ++i)
+    {
+        IShellItem_Release(This->navpane.quick_items[i]);
+        This->navpane.quick_items[i] = NULL;
+    }
+    This->navpane.quick_count = 0;
+    if (This->navpane.quick_icons)
+    {
+        ImageList_Destroy(This->navpane.quick_icons);
+        This->navpane.quick_icons = NULL;
+    }
+}
+
+static LRESULT quick_access_activate(ExplorerBrowserImpl *This, int index)
+{
+    if (index >= 0 && index < This->navpane.quick_count)
+        IExplorerBrowser_BrowseToObject(&This->IExplorerBrowser_iface,
+                                        (IUnknown *)This->navpane.quick_items[index], SBSP_ABSOLUTE);
+    return 0;
+}
+
 static void update_layout(ExplorerBrowserImpl *This)
 {
     RECT rc;
@@ -369,6 +574,11 @@ static HRESULT create_new_shellview(ExplorerBrowserImpl *This, IShellItem *psi)
 
                 This->psv = psv;
                 This->hwnd_sv = hwnd_new;
+                if (This->ui_font)
+                {
+                    SendMessageW(hwnd_new, WM_SETFONT, (WPARAM)This->ui_font, TRUE);
+                    EnumChildWindows(hwnd_new, set_ui_font, (LPARAM)This->ui_font);
+                }
                 events_ViewCreated(This, psv);
             }
             else
@@ -592,11 +802,6 @@ static LRESULT navpane_on_wm_create(HWND hwnd, CREATESTRUCTW *crs)
             if(FAILED(hr))
                 ERR("TreeAdvise failed. (0x%08lx).\n", hr);
 
-            /*
-             * Add the default roots
-             */
-
-            /* TODO: This should be FOLDERID_Links */
             hr = SHGetSpecialFolderLocation(NULL, CSIDL_FAVORITES, &pidl);
             if(SUCCEEDED(hr))
             {
@@ -618,47 +823,72 @@ static LRESULT navpane_on_wm_create(HWND hwnd, CREATESTRUCTW *crs)
                 IShellItem_Release(psi);
             }
 
-            /* TODO:
-             * We should advertise IID_INameSpaceTreeControl to the site of the
-             * host through its IProfferService interface, if any.
-             */
-
             This->navpane.pnstc2 = pnstc2;
             This->navpane.nstc_cookie = cookie;
-
+            create_quick_access(This, GetParent(hwnd));
+            This->navpane.hwnd_divider = CreateWindowExW(0, WC_STATICW, NULL,
+                    WS_CHILD | WS_VISIBLE | SS_ETCHEDHORZ, 0, 0, 0, 0, GetParent(hwnd), NULL,
+                    shell32_hInstance, NULL);
+            if (This->ui_font)
+            {
+                SendMessageW(This->navpane.hwnd_nstc, WM_SETFONT, (WPARAM)This->ui_font, TRUE);
+                EnumChildWindows(This->navpane.hwnd_nstc, set_ui_font, (LPARAM)This->ui_font);
+            }
+            navpane_on_wm_size_move(This);
             return TRUE;
         }
     }
 
     This->navpane.pnstc2 = NULL;
     ERR("Failed (0x%08lx)\n", hr);
-
     return FALSE;
 }
 
 static LRESULT navpane_on_wm_size_move(ExplorerBrowserImpl *This)
 {
-    UINT height, width;
+    UINT height, width, quick_height, padding, indent, margin, divider_height, tree_top;
     int splitter_width = MulDiv(SPLITTER_WIDTH, This->dpix, USER_DEFAULT_SCREEN_DPI);
 
     TRACE("%p\n", This);
 
     width = This->navpane.rc.right - This->navpane.rc.left - splitter_width;
     height = This->navpane.rc.bottom - This->navpane.rc.top;
+    quick_height = This->navpane.quick_height;
+    padding = MulDiv(QUICK_ACCESS_PADDING, This->dpiy, USER_DEFAULT_SCREEN_DPI);
+    indent = MulDiv(QUICK_ACCESS_INDENT, This->dpix, USER_DEFAULT_SCREEN_DPI);
+    margin = MulDiv(QUICK_ACCESS_DIVIDER_MARGIN, This->dpiy, USER_DEFAULT_SCREEN_DPI);
+    divider_height = MulDiv(QUICK_ACCESS_DIVIDER_HEIGHT, This->dpiy, USER_DEFAULT_SCREEN_DPI);
+    if (padding + quick_height + margin * 2 + divider_height > height)
+        quick_height = height > padding + margin * 2 + divider_height ?
+                       height - padding - margin * 2 - divider_height : 0;
 
-    MoveWindow(This->navpane.hwnd_nstc,
-               This->navpane.rc.left, This->navpane.rc.top,
-               width, height,
-               TRUE);
+    if (This->navpane.hwnd_quick)
+    {
+        SendMessageW(This->navpane.hwnd_quick, LVM_SETCOLUMNWIDTH, 0, indent);
+        SendMessageW(This->navpane.hwnd_quick, LVM_SETCOLUMNWIDTH, 1, width > indent ? width - indent : 0);
+        MoveWindow(This->navpane.hwnd_quick, This->navpane.rc.left, This->navpane.rc.top + padding,
+                   width, quick_height, TRUE);
+    }
+    tree_top = This->navpane.rc.top + padding + quick_height + margin;
+    if (This->navpane.hwnd_divider)
+        MoveWindow(This->navpane.hwnd_divider, This->navpane.rc.left + padding, tree_top,
+                   width > padding * 2 ? width - padding * 2 : 0, divider_height, TRUE);
+    tree_top += divider_height + margin;
+    if (This->navpane.hwnd_nstc)
+        MoveWindow(This->navpane.hwnd_nstc, This->navpane.rc.left, tree_top, width,
+                   This->navpane.rc.bottom > tree_top ? This->navpane.rc.bottom - tree_top : 0, TRUE);
 
     return FALSE;
 }
 
 static LRESULT navpane_on_wm_destroy(ExplorerBrowserImpl *This)
 {
-    INameSpaceTreeControl2_TreeUnadvise(This->navpane.pnstc2, This->navpane.nstc_cookie);
-    INameSpaceTreeControl2_Release(This->navpane.pnstc2);
-    This->navpane.pnstc2 = NULL;
+    if (This->navpane.pnstc2)
+    {
+        INameSpaceTreeControl2_TreeUnadvise(This->navpane.pnstc2, This->navpane.nstc_cookie);
+        INameSpaceTreeControl2_Release(This->navpane.pnstc2);
+        This->navpane.pnstc2 = NULL;
+    }
     return TRUE;
 }
 
@@ -746,6 +976,11 @@ static LRESULT CALLBACK main_wndproc(HWND hWnd, UINT uMessage, WPARAM wParam, LP
     {
     case WM_CREATE:           return main_on_wm_create(hWnd, (CREATESTRUCTW*)lParam);
     case WM_SIZE:             return main_on_wm_size(This);
+    case WM_NOTIFY:
+        if (This && This->navpane.hwnd_quick && ((NMHDR *)lParam)->hwndFrom == This->navpane.hwnd_quick &&
+            (((NMHDR *)lParam)->code == NM_CLICK || ((NMHDR *)lParam)->code == LVN_ITEMACTIVATE))
+            return quick_access_activate(This, ((NMITEMACTIVATE *)lParam)->iItem);
+        break;
     case CWM_GETISHELLBROWSER: return main_on_cwm_getishellbrowser(This);
     default:                  return DefWindowProcW(hWnd, uMessage, wParam, lParam);
     }
@@ -868,7 +1103,9 @@ static HRESULT WINAPI IExplorerBrowser_fnInitialize(IExplorerBrowser *iface,
 
     parent_dc = GetDC(hwndParent);
     This->dpix = GetDeviceCaps(parent_dc, LOGPIXELSX);
+    This->dpiy = GetDeviceCaps(parent_dc, LOGPIXELSY);
     ReleaseDC(hwndParent, parent_dc);
+    This->ui_font = create_ui_font(This->dpiy);
 
     This->navpane.width = MulDiv(NP_DEFAULT_WIDTH, This->dpix, USER_DEFAULT_SCREEN_DPI);
 
@@ -912,6 +1149,12 @@ static HRESULT WINAPI IExplorerBrowser_fnDestroy(IExplorerBrowser *iface)
     This->current_pidl = NULL;
 
     DestroyWindow(This->hwnd_main);
+    destroy_quick_access(This);
+    if (This->ui_font)
+    {
+        DeleteObject(This->ui_font);
+        This->ui_font = NULL;
+    }
     This->destroyed = TRUE;
 
     return S_OK;
@@ -1201,6 +1444,7 @@ static HRESULT WINAPI IExplorerBrowser_fnBrowseToIDList(IExplorerBrowser *iface,
     events_NavigationComplete(This, absolute_pidl);
     ILFree(This->current_pidl);
     This->current_pidl = absolute_pidl;
+    quick_access_select_current(This);
 
     /* Expand the NameSpaceTree to the current location. */
     if(This->navpane.show && This->navpane.pnstc2)

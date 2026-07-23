@@ -40,6 +40,10 @@
 #define IDC_NAVFORWARD       202
 #define IDC_NAVUP            203
 
+#define IDI_WINE_NAV_BACK    1008
+#define IDI_WINE_NAV_FORWARD 1009
+#define IDI_WINE_NAV_UP      1010
+
 #include <initguid.h>
 /* This seems to be another version of IID_IFileDialogCustomize. If
  * there is any difference I have yet to find it. */
@@ -120,6 +124,8 @@ typedef struct FileDialogImpl {
     IShellItem *psi_folder;
 
     HWND dlg_hwnd;
+    HWND address_hwnd;
+    HIMAGELIST nav_icons;
     IExplorerBrowser *peb;
     DWORD ebevents_cookie;
 
@@ -1741,8 +1747,8 @@ static void update_layout(FileDialogImpl *This)
     RECT dialog_rc;
     RECT cancel_rc, dropdown_rc, open_rc;
     RECT filetype_rc, filename_rc, filenamelabel_rc;
-    RECT toolbar_rc, ebrowser_rc, customctrls_rc;
-    static const UINT vspacing = 4, hspacing = 4;
+    RECT toolbar_rc, address_rc, ebrowser_rc, customctrls_rc;
+    static const UINT vspacing = 8, hspacing = 8;
     static const UINT min_width = 320, min_height = 200;
     BOOL show_dropdown;
 
@@ -1868,12 +1874,23 @@ static void update_layout(FileDialogImpl *This)
         filename_rc.bottom = filename_rc.top + filename_height;
     }
 
+    SetRect(&toolbar_rc, dialog_rc.left + hspacing, dialog_rc.top + vspacing,
+            dialog_rc.left + hspacing, dialog_rc.top + vspacing + 32);
     hwnd = GetDlgItem(This->dlg_hwnd, IDC_NAV_TOOLBAR);
     if(hwnd)
     {
-        GetWindowRect(hwnd, &toolbar_rc);
-        MapWindowPoints(NULL, This->dlg_hwnd, (POINT*)&toolbar_rc, 2);
+        RECT last_button;
+        if (SendMessageW(hwnd, TB_GETITEMRECT, 2, (LPARAM)&last_button))
+        {
+            toolbar_rc.right += last_button.right;
+            toolbar_rc.bottom = toolbar_rc.top + last_button.bottom;
+        }
     }
+
+    address_rc.left = toolbar_rc.right + hspacing;
+    address_rc.top = toolbar_rc.top;
+    address_rc.right = dialog_rc.right - hspacing;
+    address_rc.bottom = toolbar_rc.bottom;
 
     /* The custom controls */
     customctrls_rc.left = dialog_rc.left + hspacing;
@@ -1884,7 +1901,7 @@ static void update_layout(FileDialogImpl *This)
 
     /* The ExplorerBrowser control. */
     ebrowser_rc.left = dialog_rc.left + hspacing;
-    ebrowser_rc.top = toolbar_rc.bottom + vspacing;
+    ebrowser_rc.top = address_rc.bottom + vspacing;
     ebrowser_rc.right = dialog_rc.right - hspacing;
     ebrowser_rc.bottom = customctrls_rc.top - vspacing;
 
@@ -1893,7 +1910,17 @@ static void update_layout(FileDialogImpl *This)
      */
 
     /* FIXME: The Save Dialog uses a slightly different layout. */
-    hdwp = BeginDeferWindowPos(7);
+    hdwp = BeginDeferWindowPos(9);
+
+    if(hdwp && (hwnd = GetDlgItem(This->dlg_hwnd, IDC_NAV_TOOLBAR)))
+        DeferWindowPos(hdwp, hwnd, NULL, toolbar_rc.left, toolbar_rc.top,
+                       toolbar_rc.right - toolbar_rc.left, toolbar_rc.bottom - toolbar_rc.top,
+                       SWP_NOZORDER | SWP_NOACTIVATE);
+
+    if(hdwp && This->address_hwnd)
+        DeferWindowPos(hdwp, This->address_hwnd, NULL, address_rc.left, address_rc.top,
+                       address_rc.right - address_rc.left, address_rc.bottom - address_rc.top,
+                       SWP_NOZORDER | SWP_NOACTIVATE);
 
     if(hdwp && This->peb)
         IExplorerBrowser_SetRect(This->peb, &hdwp, ebrowser_rc);
@@ -1994,50 +2021,87 @@ static HRESULT init_explorerbrowser(FileDialogImpl *This)
     return S_OK;
 }
 
+static HIMAGELIST create_itemdlg_nav_icons(FileDialogImpl *This)
+{
+    static const UINT ids[] = { IDI_WINE_NAV_BACK, IDI_WINE_NAV_FORWARD, IDI_WINE_NAV_UP };
+    HINSTANCE shell32 = GetModuleHandleW(L"shell32.dll");
+    int size = MulDiv(20, This->dpi_x, USER_DEFAULT_SCREEN_DPI);
+    HIMAGELIST icons;
+    unsigned int i;
+
+    if (!shell32) shell32 = LoadLibraryW(L"shell32.dll");
+    if (!(icons = ImageList_Create(size, size, ILC_COLOR32, ARRAY_SIZE(ids), 1))) return NULL;
+    for (i = 0; i < ARRAY_SIZE(ids); ++i)
+    {
+        HICON icon = LoadImageW(shell32, MAKEINTRESOURCEW(ids[i]), IMAGE_ICON,
+                                size, size, LR_DEFAULTCOLOR);
+        if (icon)
+        {
+            ImageList_AddIcon(icons, icon);
+            DestroyIcon(icon);
+        }
+    }
+    return icons;
+}
+
+static void update_address_bar(FileDialogImpl *This)
+{
+    WCHAR *path = NULL;
+
+    if (!This->address_hwnd || !This->psi_folder) return;
+    if (FAILED(IShellItem_GetDisplayName(This->psi_folder, SIGDN_FILESYSPATH, &path)))
+        IShellItem_GetDisplayName(This->psi_folder, SIGDN_NORMALDISPLAY, &path);
+    if (path)
+    {
+        SetWindowTextW(This->address_hwnd, path);
+        CoTaskMemFree(path);
+    }
+}
+
 static void init_toolbar(FileDialogImpl *This, HWND hwnd)
 {
-    HWND htoolbar;
-    TBADDBITMAP tbab;
-    TBBUTTON button[3];
-    int height;
-    int navUpImgIndex;
+    INITCOMMONCONTROLSEX controls = { sizeof(controls), ICC_BAR_CLASSES | ICC_USEREX_CLASSES };
+    HWND htoolbar, edit;
+    TBBUTTON button[3] = {0};
+    HFONT font = (HFONT)SendMessageW(hwnd, WM_GETFONT, 0, 0);
+    int height = MulDiv(32, This->dpi_y, USER_DEFAULT_SCREEN_DPI);
 
+    InitCommonControlsEx(&controls);
     htoolbar = CreateWindowExW(0, TOOLBARCLASSNAMEW, NULL, TBSTYLE_FLAT | WS_CHILD | WS_VISIBLE,
-                               0, 0, 0, 0,
-                               hwnd, (HMENU)IDC_NAV_TOOLBAR, NULL, NULL);
+                               0, 0, 0, 0, hwnd, (HMENU)IDC_NAV_TOOLBAR, NULL, NULL);
+    This->nav_icons = create_itemdlg_nav_icons(This);
+    SendMessageW(htoolbar, TB_SETIMAGELIST, 0, (LPARAM)This->nav_icons);
 
-    tbab.hInst = HINST_COMMCTRL;
-    tbab.nID = IDB_HIST_LARGE_COLOR;
-    SendMessageW(htoolbar, TB_ADDBITMAP, 0, (LPARAM)&tbab);
-    tbab.nID = IDB_VIEW_LARGE_COLOR;
-    navUpImgIndex = SendMessageW(htoolbar, TB_ADDBITMAP, 0, (LPARAM)&tbab);
-    navUpImgIndex += VIEW_PARENTFOLDER;
-
-    button[0].iBitmap = HIST_BACK;
+    button[0].iBitmap = 0;
     button[0].idCommand = IDC_NAVBACK;
     button[0].fsState = TBSTATE_ENABLED;
     button[0].fsStyle = BTNS_BUTTON;
-    button[0].dwData = 0;
-    button[0].iString = 0;
-
-    button[1].iBitmap = HIST_FORWARD;
+    button[1].iBitmap = 1;
     button[1].idCommand = IDC_NAVFORWARD;
     button[1].fsState = TBSTATE_ENABLED;
     button[1].fsStyle = BTNS_BUTTON;
-    button[1].dwData = 0;
-    button[1].iString = 0;
-
-    button[2].iBitmap = navUpImgIndex;
+    button[2].iBitmap = 2;
     button[2].idCommand = IDC_NAVUP;
     button[2].fsState = TBSTATE_ENABLED;
     button[2].fsStyle = BTNS_BUTTON;
-    button[2].dwData = 0;
-    button[2].iString = 0;
 
-    SendMessageW(htoolbar, TB_ADDBUTTONSW, 3, (LPARAM)button);
-    height = MulDiv(24, This->dpi_y, USER_DEFAULT_SCREEN_DPI);
+    SendMessageW(htoolbar, TB_BUTTONSTRUCTSIZE, sizeof(TBBUTTON), 0);
+    SendMessageW(htoolbar, TB_ADDBUTTONSW, ARRAY_SIZE(button), (LPARAM)button);
     SendMessageW(htoolbar, TB_SETBUTTONSIZE, 0, MAKELPARAM(height, height));
     SendMessageW(htoolbar, TB_AUTOSIZE, 0, 0);
+    if (font) SendMessageW(htoolbar, WM_SETFONT, (WPARAM)font, TRUE);
+
+    This->address_hwnd = CreateWindowExW(WS_EX_CLIENTEDGE, WC_COMBOBOXEXW, NULL,
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | CBS_DROPDOWN | CBS_AUTOHSCROLL,
+            0, 0, 100, height, hwnd, (HMENU)IDC_ADDRESS, COMDLG32_hInstance, NULL);
+    if (!This->address_hwnd)
+        ERR("Failed to create address bar, error %lu.\n", GetLastError());
+    if (font && This->address_hwnd)
+    {
+        SendMessageW(This->address_hwnd, WM_SETFONT, (WPARAM)font, TRUE);
+        edit = (HWND)SendMessageW(This->address_hwnd, CBEM_GETEDITCONTROL, 0, 0);
+        if (edit) SendMessageW(edit, WM_SETFONT, (WPARAM)font, TRUE);
+    }
 }
 
 static void update_control_text(FileDialogImpl *This)
@@ -2180,6 +2244,7 @@ static LRESULT on_wm_initdialog(HWND hwnd, LPARAM lParam)
     ctrl_container_reparent(This, This->dlg_hwnd);
     init_explorerbrowser(This);
     init_toolbar(This, hwnd);
+    update_address_bar(This);
     update_control_text(This);
     update_layout(This);
 
@@ -2222,10 +2287,17 @@ static LRESULT on_wm_destroy(FileDialogImpl *This)
     }
 
     ctrl_container_reparent(This, NULL);
-    This->dlg_hwnd = NULL;
 
     DeleteObject(This->hfont_opendropdown);
     This->hfont_opendropdown = NULL;
+    if (This->nav_icons)
+    {
+        SendDlgItemMessageW(This->dlg_hwnd, IDC_NAV_TOOLBAR, TB_SETIMAGELIST, 0, 0);
+        ImageList_Destroy(This->nav_icons);
+        This->nav_icons = NULL;
+    }
+    This->address_hwnd = NULL;
+    This->dlg_hwnd = NULL;
 
     return TRUE;
 }
@@ -2332,6 +2404,35 @@ static LRESULT on_browse_up(FileDialogImpl *This)
     return FALSE;
 }
 
+static LRESULT on_wm_notify(FileDialogImpl *This, LPARAM lparam)
+{
+    NMHDR *header = (NMHDR *)lparam;
+
+    if (header->hwndFrom == This->address_hwnd && header->code == CBEN_ENDEDITW)
+    {
+        NMCBEENDEDITW *edit_info = (NMCBEENDEDITW *)lparam;
+
+        if (edit_info->iWhy == CBENF_RETURN)
+        {
+            HWND edit = (HWND)SendMessageW(This->address_hwnd, CBEM_GETEDITCONTROL, 0, 0);
+            WCHAR path[32768];
+            IShellItem *item;
+
+            GetWindowTextW(edit, path, ARRAY_SIZE(path));
+            if (SUCCEEDED(SHCreateItemFromParsingName(path, NULL, &IID_IShellItem, (void **)&item)))
+            {
+                IExplorerBrowser_BrowseToObject(This->peb, (IUnknown *)item, SBSP_ABSOLUTE);
+                IShellItem_Release(item);
+            }
+            else
+                update_address_bar(This);
+        }
+        else if (edit_info->iWhy == CBENF_ESCAPE)
+            update_address_bar(This);
+    }
+    return FALSE;
+}
+
 static LRESULT on_wm_command(FileDialogImpl *This, WPARAM wparam, LPARAM lparam)
 {
     switch(LOWORD(wparam))
@@ -2356,6 +2457,7 @@ static INT_PTR CALLBACK itemdlg_dlgproc(HWND hwnd, UINT umessage, WPARAM wparam,
     {
     case WM_INITDIALOG:       return on_wm_initdialog(hwnd, lparam);
     case WM_COMMAND:          return on_wm_command(This, wparam, lparam);
+    case WM_NOTIFY:           return on_wm_notify(This, lparam);
     case WM_SIZE:             return on_wm_size(This);
     case WM_GETMINMAXINFO:    return on_wm_getminmaxinfo(This, lparam);
     case WM_DESTROY:          return on_wm_destroy(This);
@@ -3536,6 +3638,7 @@ static HRESULT WINAPI IExplorerBrowserEvents_fnOnNavigationComplete(IExplorerBro
         This->psi_folder = NULL;
     }
 
+    update_address_bar(This);
     events_OnFolderChange(This);
 
     return S_OK;

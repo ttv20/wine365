@@ -55,10 +55,20 @@ SOURCES = \
 	resources/netdrive.svg \
 	resources/netdrive2.svg \
 	resources/network.svg \
+	resources/nav_back.svg \
+	resources/nav_forward.svg \
+	resources/nav_up.svg \
 	resources/optical_disc.svg \
 	resources/optical_drive.svg \
 	resources/play.svg \
 	resources/printer.svg \
+	resources/quick_computer.svg \
+	resources/quick_desktop.svg \
+	resources/quick_documents.svg \
+	resources/quick_downloads.svg \
+	resources/quick_home.svg \
+	resources/quick_pictures.svg \
+	resources/quick_videos.svg \
 	resources/ramdisk.svg \
 	resources/recent.svg \
 	resources/rename.svg \

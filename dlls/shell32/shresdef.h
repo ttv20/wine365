@@ -100,6 +100,7 @@
 #define IDS_USER_PROFILES           93
 #define IDS_DOCUMENTS               95
 #define IDS_DOWNLOADS               96
+#define IDS_HOME                    97
 
 #define IDS_CREATEFOLDER_DENIED     128
 #define IDS_CREATEFOLDER_CAPTION    129
@@ -376,6 +377,16 @@
 #define IDI_SHELL_WEB_BROWSER      512
 /* 512 - 1000 not used on Windows */
 #define IDI_SHELL_INFO             1001
+#define IDI_WINE_QUICK_HOME        1002
+#define IDI_WINE_QUICK_DOCUMENTS   1003
+#define IDI_WINE_QUICK_DOWNLOADS   1004
+#define IDI_WINE_QUICK_DESKTOP     1005
+#define IDI_WINE_QUICK_PICTURES    1006
+#define IDI_WINE_QUICK_VIDEOS      1007
+#define IDI_WINE_NAV_BACK           1008
+#define IDI_WINE_NAV_FORWARD        1009
+#define IDI_WINE_NAV_UP             1010
+#define IDI_WINE_QUICK_COMPUTER     1011
 /* 1012 - 8239 not used on Windows */
 #define IDI_SHELL_COMPUTER_OFF     8240
 /* 8241 - 16709 not used on Windows */

@@ -233,6 +233,7 @@ the folder?"
 	IDS_USER_PROFILES           "Users"
 	IDS_DOCUMENTS               "Documents"
 	IDS_DOWNLOADS               "Downloads"
+	IDS_HOME                    "Home"
 
 	IDS_NEWFOLDER		"New Folder"
 
@@ -1068,6 +1069,28 @@ IDI_SHELL_WEB_BROWSER ICON resources/internet.ico
 
 /* @makedep: resources/info.ico */
 IDI_SHELL_INFO ICON resources/info.ico
+
+/* KDE Breeze icon subset; see resources/COPYING.breeze-icons. */
+/* @makedep: resources/quick_home.ico */
+IDI_WINE_QUICK_HOME ICON resources/quick_home.ico
+/* @makedep: resources/quick_documents.ico */
+IDI_WINE_QUICK_DOCUMENTS ICON resources/quick_documents.ico
+/* @makedep: resources/quick_downloads.ico */
+IDI_WINE_QUICK_DOWNLOADS ICON resources/quick_downloads.ico
+/* @makedep: resources/quick_desktop.ico */
+IDI_WINE_QUICK_DESKTOP ICON resources/quick_desktop.ico
+/* @makedep: resources/quick_pictures.ico */
+IDI_WINE_QUICK_PICTURES ICON resources/quick_pictures.ico
+/* @makedep: resources/quick_videos.ico */
+IDI_WINE_QUICK_VIDEOS ICON resources/quick_videos.ico
+/* @makedep: resources/quick_computer.ico */
+IDI_WINE_QUICK_COMPUTER ICON resources/quick_computer.ico
+/* @makedep: resources/nav_back.ico */
+IDI_WINE_NAV_BACK ICON resources/nav_back.ico
+/* @makedep: resources/nav_forward.ico */
+IDI_WINE_NAV_FORWARD ICON resources/nav_forward.ico
+/* @makedep: resources/nav_up.ico */
+IDI_WINE_NAV_UP ICON resources/nav_up.ico
 
 /* FIXME: Following resource is not yet added */
 /* @makedep: resources/mycomputer.ico */

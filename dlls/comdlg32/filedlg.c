@@ -119,6 +119,18 @@ typedef struct tagLookInInfo
 #define TBPLACES_CMDID_PLACE2    0xa066
 #define TBPLACES_CMDID_PLACE3    0xa067
 #define TBPLACES_CMDID_PLACE4    0xa068
+#define TBPLACES_CMDID_PLACE5    0xa069
+#define TBPLACES_CMDID_PLACE6    0xa06a
+
+#define IDI_WINE_QUICK_HOME        1002
+#define IDI_WINE_QUICK_DOCUMENTS   1003
+#define IDI_WINE_QUICK_DOWNLOADS   1004
+#define IDI_WINE_QUICK_DESKTOP     1005
+#define IDI_WINE_QUICK_PICTURES    1006
+#define IDI_WINE_QUICK_VIDEOS      1007
+#define IDI_WINE_QUICK_COMPUTER    1011
+#define IDS_WINE_HOME                 97
+#define IDS_WINE_MYCOMPUTER           21
 
 /* NOTE
  * Those macros exist in windowsx.h. However, you can't really use them since
@@ -185,6 +197,7 @@ static int     FILEDLG95_LOOKIN_InsertItemAfterParent(HWND hwnd,LPITEMIDLIST pid
 static int     FILEDLG95_LOOKIN_RemoveMostExpandedItem(HWND hwnd);
        int     FILEDLG95_LOOKIN_SelectItem(HWND hwnd,LPITEMIDLIST pidl);
 static void    FILEDLG95_LOOKIN_Clean(HWND hwnd);
+static void    filedlg_browse_to_pidl(const FileOpenDlgInfos *info, LPITEMIDLIST pidl);
 
 /* Functions for dealing with the most-recently-used registry keys */
 static void FILEDLG95_MRU_load_filename(LPWSTR stored_path);
@@ -277,11 +290,19 @@ static BOOL is_places_bar_enabled(const FileOpenDlgInfos *fodInfos)
 
 static void filedlg_collect_places_pidls(FileOpenDlgInfos *fodInfos)
 {
-    static const int default_places[] =
+    static const struct
     {
-        CSIDL_DESKTOP,
-        CSIDL_MYDOCUMENTS,
-        CSIDL_DRIVES,
+        const KNOWNFOLDERID *folder_id;
+        BOOL is_virtual;
+    } default_places[] =
+    {
+        { &FOLDERID_Profile, FALSE },
+        { &FOLDERID_Documents, FALSE },
+        { &FOLDERID_Downloads, FALSE },
+        { &FOLDERID_Desktop, FALSE },
+        { &FOLDERID_ComputerFolder, TRUE },
+        { &FOLDERID_Pictures, FALSE },
+        { &FOLDERID_Videos, FALSE },
     };
     unsigned int i;
     HKEY hkey;
@@ -289,7 +310,10 @@ static void filedlg_collect_places_pidls(FileOpenDlgInfos *fodInfos)
     if (!RegOpenKeyA(HKEY_CURRENT_USER, "Software\\Microsoft\\Windows\\CurrentVersion\\Policies\\Comdlg32\\Placesbar",
             &hkey))
     {
-        for (i = 0; i < ARRAY_SIZE(fodInfos->places); i++)
+        fodInfos->custom_places = TRUE;
+        /* Windows policy exposes Place0 through Place4. Keep that contract
+         * even though Wine's default quick-access list contains six rows. */
+        for (i = 0; i < 5; i++)
         {
             WCHAR nameW[8];
             DWORD value;
@@ -319,7 +343,21 @@ static void filedlg_collect_places_pidls(FileOpenDlgInfos *fodInfos)
     }
 
     for (i = 0; i < ARRAY_SIZE(default_places); i++)
-        SHGetSpecialFolderLocation(NULL, default_places[i], &fodInfos->places[i]);
+    {
+        WCHAR *path;
+        DWORD attrs;
+
+        if (default_places[i].is_virtual)
+        {
+            SHGetKnownFolderIDList(default_places[i].folder_id, 0, NULL, &fodInfos->places[i]);
+            continue;
+        }
+        if (FAILED(SHGetKnownFolderPath(default_places[i].folder_id, 0, NULL, &path))) continue;
+        attrs = GetFileAttributesW(path);
+        CoTaskMemFree(path);
+        if (attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY))
+            SHGetKnownFolderIDList(default_places[i].folder_id, 0, NULL, &fodInfos->places[i]);
+    }
 }
 
 /***********************************************************************
@@ -1214,6 +1252,16 @@ static LRESULT FILEDLG95_OnWMSize(HWND hwnd, WPARAM wParam)
                             SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOZORDER);
                     break;
 #endif
+                case IDC_ADDRESS:
+                    DeferWindowPos(hdwp, ctrl, NULL, 0, 0,
+                            rc.right - rc.left + chgx, rc.bottom - rc.top,
+                            SWP_NOMOVE | SWP_NOACTIVATE | SWP_NOZORDER);
+                    break;
+                case IDC_TOOLBARSTATIC:
+                case IDC_TOOLBAR:
+                    DeferWindowPos(hdwp, ctrl, NULL, rc.left + chgx, rc.top,
+                            0, 0, SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOZORDER);
+                    break;
                 /* not resized in windows. Since wine uses this invisible control
                  * to size the browser view it needs to be resized */
                 case IDC_SHELLSTATIC:
@@ -1477,6 +1525,39 @@ static inline BOOL filename_is_edit( const FileOpenDlgInfos *info )
  *
  * WM_INITDIALOG message handler (before hook notification)
  */
+static LRESULT CALLBACK address_wndproc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam)
+{
+    WNDPROC oldproc = (WNDPROC)GetPropW(hwnd, L"filedlg_address_oldproc");
+    FileOpenDlgInfos *info = get_filedlg_infoptr(GetParent(hwnd));
+
+    if (message == WM_KEYDOWN && info)
+    {
+        if (wparam == VK_RETURN)
+        {
+            WCHAR path[32768];
+            LPITEMIDLIST pidl;
+
+            GetWindowTextW(hwnd, path, ARRAY_SIZE(path));
+            if (SUCCEEDED(SHParseDisplayName(path, NULL, &pidl, 0, NULL)))
+            {
+                filedlg_browse_to_pidl(info, pidl);
+                ILFree(pidl);
+            }
+            else
+                FILEDLG95_LOOKIN_SelectItem(info->DlgInfos.hwndLookInCB, info->ShellInfos.pidlAbsCurrent);
+            return 0;
+        }
+        if (wparam == VK_ESCAPE)
+        {
+            FILEDLG95_LOOKIN_SelectItem(info->DlgInfos.hwndLookInCB, info->ShellInfos.pidlAbsCurrent);
+            return 0;
+        }
+    }
+    if (message == WM_NCDESTROY)
+        RemovePropW(hwnd, L"filedlg_address_oldproc");
+    return oldproc ? CallWindowProcW(oldproc, hwnd, message, wparam, lparam) : DefWindowProcW(hwnd, message, wparam, lparam);
+}
+
 static LRESULT FILEDLG95_InitControls(HWND hwnd)
 {
   BOOL win2000plus = FALSE;
@@ -1537,7 +1618,15 @@ static LRESULT FILEDLG95_InitControls(HWND hwnd)
   fodInfos->DlgInfos.hwndFileTypeCB = GetDlgItem(hwnd,IDC_FILETYPE);
   fodInfos->DlgInfos.hwndLookInCB = GetDlgItem(hwnd,IDC_LOOKIN);
 
-  GetWindowRect( fodInfos->DlgInfos.hwndLookInCB,&rectlook);
+  if (GetDlgItem(hwnd, IDC_ADDRESS))
+  {
+      HWND address = GetDlgItem(hwnd, IDC_ADDRESS);
+      WNDPROC oldproc = (WNDPROC)SetWindowLongPtrW(address, GWLP_WNDPROC, (LONG_PTR)address_wndproc);
+      SetPropW(address, L"filedlg_address_oldproc", (HANDLE)oldproc);
+      GetWindowRect(address, &rectlook);
+  }
+  else
+      GetWindowRect(fodInfos->DlgInfos.hwndLookInCB, &rectlook);
   MapWindowPoints( 0, hwnd,(LPPOINT)&rectlook,2);
 
   /* construct the toolbar */
@@ -1585,42 +1674,61 @@ static LRESULT FILEDLG95_InitControls(HWND hwnd)
 
   if (is_places_bar_enabled(fodInfos))
   {
+      static const UINT quick_icon_ids[] = { IDI_WINE_QUICK_HOME, IDI_WINE_QUICK_DOCUMENTS,
+          IDI_WINE_QUICK_DOWNLOADS, IDI_WINE_QUICK_DESKTOP, IDI_WINE_QUICK_COMPUTER,
+          IDI_WINE_QUICK_PICTURES, IDI_WINE_QUICK_VIDEOS };
       TBBUTTON tb = { 0 };
       HIMAGELIST himl;
+      HINSTANCE shell32 = GetModuleHandleW(L"shell32.dll");
+      HFONT font = (HFONT)SendMessageW(hwnd, WM_GETFONT, 0, 0);
       RECT rect;
-      int i, cx;
+      int i, cx, icon_size, row_height;
 
+      if (!shell32) shell32 = LoadLibraryW(L"shell32.dll");
       SendDlgItemMessageW(hwnd, IDC_TOOLBARPLACES, TB_BUTTONSTRUCTSIZE, 0, 0);
+      if (font) SendDlgItemMessageW(hwnd, IDC_TOOLBARPLACES, WM_SETFONT, (WPARAM)font, TRUE);
       GetClientRect(GetDlgItem(hwnd, IDC_TOOLBARPLACES), &rect);
       cx = rect.right - rect.left;
+      icon_size = MulDiv(20, GetDpiForWindow(hwnd), USER_DEFAULT_SCREEN_DPI);
+      row_height = MulDiv(30, GetDpiForWindow(hwnd), USER_DEFAULT_SCREEN_DPI);
 
       SendDlgItemMessageW(hwnd, IDC_TOOLBARPLACES, TB_SETBUTTONWIDTH, 0, MAKELPARAM(cx, cx));
-      himl = ImageList_Create(GetSystemMetrics(SM_CXICON), GetSystemMetrics(SM_CYICON), ILC_COLOR32, 4, 1);
+      himl = ImageList_Create(icon_size, icon_size, ILC_COLOR32, ARRAY_SIZE(fodInfos->places), 1);
 
       filedlg_collect_places_pidls(fodInfos);
       for (i = 0; i < ARRAY_SIZE(fodInfos->places); i++)
       {
+          HICON icon = NULL;
           int index;
 
-          if (!fodInfos->places[i])
-              continue;
+          if (!fodInfos->places[i]) continue;
 
           memset(&fileinfo, 0, sizeof(fileinfo));
           SHGetFileInfoW((const WCHAR *)fodInfos->places[i], 0, &fileinfo, sizeof(fileinfo),
-              SHGFI_PIDL | SHGFI_DISPLAYNAME | SHGFI_ICON);
-          index = ImageList_AddIcon(himl, fileinfo.hIcon);
+                         SHGFI_PIDL | SHGFI_DISPLAYNAME | SHGFI_ICON | SHGFI_SMALLICON);
+          if (!fodInfos->custom_places)
+              icon = LoadImageW(shell32, MAKEINTRESOURCEW(quick_icon_ids[i]), IMAGE_ICON,
+                                icon_size, icon_size, LR_DEFAULTCOLOR);
+          if (!icon) icon = fileinfo.hIcon;
+          index = ImageList_AddIcon(himl, icon);
 
+          if (!fodInfos->custom_places && i == 0)
+              LoadStringW(shell32, IDS_WINE_HOME, fileinfo.szDisplayName, ARRAY_SIZE(fileinfo.szDisplayName));
+          else if (!fodInfos->custom_places && i == 4)
+              LoadStringW(shell32, IDS_WINE_MYCOMPUTER, fileinfo.szDisplayName, ARRAY_SIZE(fileinfo.szDisplayName));
           tb.iBitmap = index;
           tb.iString = (INT_PTR)fileinfo.szDisplayName;
           tb.fsState = TBSTATE_ENABLED | TBSTATE_WRAP;
+          tb.fsStyle = BTNS_BUTTON;
           tb.idCommand = TBPLACES_CMDID_PLACE0 + i;
           SendDlgItemMessageW(hwnd, IDC_TOOLBARPLACES, TB_ADDBUTTONSW, 1, (LPARAM)&tb);
 
-          DestroyIcon(fileinfo.hIcon);
+          if (icon) DestroyIcon(icon);
+          if (fileinfo.hIcon && fileinfo.hIcon != icon) DestroyIcon(fileinfo.hIcon);
       }
 
       SendDlgItemMessageW(hwnd, IDC_TOOLBARPLACES, TB_SETIMAGELIST, 0, (LPARAM)himl);
-      SendDlgItemMessageW(hwnd, IDC_TOOLBARPLACES, TB_SETBUTTONSIZE, 0, MAKELPARAM(cx, cx * 3 / 4));
+      SendDlgItemMessageW(hwnd, IDC_TOOLBARPLACES, TB_SETBUTTONSIZE, 0, MAKELPARAM(cx, row_height));
   }
 
   /* Set the window text with the text specified in the OPENFILENAME structure */
@@ -2043,6 +2151,8 @@ static LRESULT FILEDLG95_OnWMCommand(HWND hwnd, WPARAM wParam)
   case TBPLACES_CMDID_PLACE2:
   case TBPLACES_CMDID_PLACE3:
   case TBPLACES_CMDID_PLACE4:
+  case TBPLACES_CMDID_PLACE5:
+  case TBPLACES_CMDID_PLACE6:
     filedlg_browse_to_pidl(fodInfos, fodInfos->places[id - TBPLACES_CMDID_PLACE0]);
     break;
 
@@ -3641,6 +3751,20 @@ int FILEDLG95_LOOKIN_SelectItem(HWND hwnd,LPITEMIDLIST pidl)
 
   SendMessageW(hwnd, CB_SETCURSEL, iItemPos, 0);
   liInfos->uSelectedItem = iItemPos;
+
+  if (GetDlgItem(GetParent(hwnd), IDC_ADDRESS))
+  {
+    WCHAR path[32768];
+    WCHAR *parsing = NULL;
+
+    if (SHGetPathFromIDListW(pidl, path))
+      SetDlgItemTextW(GetParent(hwnd), IDC_ADDRESS, path);
+    else if (SUCCEEDED(SHGetNameFromIDList(pidl, SIGDN_NORMALDISPLAY, &parsing)))
+    {
+      SetDlgItemTextW(GetParent(hwnd), IDC_ADDRESS, parsing);
+      CoTaskMemFree(parsing);
+    }
+  }
 
   return 0;
 
