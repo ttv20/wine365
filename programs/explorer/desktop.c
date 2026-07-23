@@ -41,6 +41,7 @@ WINE_DEFAULT_DEBUG_CHANNEL(explorer);
 #define DESKTOP_ALL_ACCESS 0x01ff
 
 static const WCHAR default_driver[] = L"mac,x11,wayland";
+static const WCHAR wayland_default_driver[] = L"mac,wayland,x11";
 
 static BOOL using_root = TRUE;
 
@@ -1006,7 +1007,8 @@ static void load_graphics_driver( const WCHAR *driver, GUID *guid )
 
     if (!driver)
     {
-        lstrcpyW( buffer, default_driver );
+        lstrcpyW( buffer, GetEnvironmentVariableW( L"WAYLAND_DISPLAY", NULL, 0 ) ?
+                         wayland_default_driver : default_driver );
 
         /* @@ Wine registry key: HKCU\Software\Wine\Drivers */
         if (!RegOpenKeyW( HKEY_CURRENT_USER, L"Software\\Wine\\Drivers", &hkey ))

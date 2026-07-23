@@ -423,7 +423,7 @@ static enum loadorder get_load_order_value( HANDLE std_key, HANDLE app_key, WCHA
  *
  * Determine loadorder using heuristics based on the version resource.
  */
-static enum loadorder version_heuristics( const UNICODE_STRING *nt_name,
+static enum loadorder version_heuristics( const UNICODE_STRING *nt_name, const WCHAR *basename,
                                           const struct pe_mapping_info *pe_mapping )
 {
     static const struct { WCHAR name[32]; enum loadorder lo; } vendors[] =
@@ -434,8 +434,11 @@ static enum loadorder version_heuristics( const UNICODE_STRING *nt_name,
     };
     static const WCHAR fileinfoW[] = {'S','t','r','i','n','g','F','i','l','e','I','n','f','o',0};
     static const WCHAR companyW[] = {'C','o','m','p','a','n','y','N','a','m','e',0};
+    static const WCHAR productW[] = {'P','r','o','d','u','c','t','N','a','m','e',0};
+    static const WCHAR officeW[] = {'M','i','c','r','o','s','o','f','t',' ','O','f','f','i','c','e',0};
+    static const WCHAR riched20W[] = {'r','i','c','h','e','d','2','0',0};
 
-    struct version_entry entry;
+    struct version_entry entry, strings, value;
     const VS_FIXEDFILEINFO *fileinfo;
     const WCHAR *name;
     ULONG i, len;
@@ -453,10 +456,27 @@ static enum loadorder version_heuristics( const UNICODE_STRING *nt_name,
     if (entry.info->val_len < sizeof(*fileinfo)) return LO_INVALID;
     if (fileinfo->dwSignature != VS_FFI_SIGNATURE) return LO_INVALID;
 
-    if (!version_find_key( &entry, fileinfoW, &entry )) return LO_INVALID;
+    if (!version_find_key( &entry, fileinfoW, &strings )) return LO_INVALID;
     /* get the first child (usually "040904B0") */
-    if (!get_version_entry( &entry, entry.child, entry.next )) return LO_INVALID;
-    if (!version_find_key( &entry, companyW, &entry )) return LO_INVALID;
+    if (!get_version_entry( &strings, strings.child, strings.next )) return LO_INVALID;
+
+    /* Office ships a private RichEdit implementation with a newer ABI than
+     * the system module, including CreateTextBoxLayout. Honor the explicit
+     * module path instead of substituting the builtin implementation. */
+    if (!wcsicmp( basename, riched20W ) && version_find_key( &strings, productW, &value )
+            && value.info->type && value.info->val_len)
+    {
+        name = value.value;
+        len = value.info->val_len;
+        if (!name[len - 1]) len--;
+        if (len >= wcslen( officeW ) && !wcsnicmp( name, officeW, wcslen( officeW ) ))
+        {
+            TRACE( "preferring native Microsoft Office RichEdit for %s\n", debugstr_us( nt_name ) );
+            return LO_NATIVE_BUILTIN;
+        }
+    }
+
+    if (!version_find_key( &strings, companyW, &entry )) return LO_INVALID;
     if (!entry.info->type || !entry.info->val_len) return LO_INVALID;
 
     name = entry.value;
@@ -539,7 +559,8 @@ enum loadorder get_load_order( const UNICODE_STRING *nt_name, BOOL is_system_dir
             TRACE( "got main exe default %s for %s\n", debugstr_loadorder(ret), debugstr_us(nt_name) );
             goto done;
         }
-        ret = version_heuristics( nt_name, pe_mapping );
+
+        ret = version_heuristics( nt_name, basename, pe_mapping );
         if (ret != LO_INVALID) goto done;
     }
 
