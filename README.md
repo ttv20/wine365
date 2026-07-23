@@ -81,26 +81,14 @@ and [`fonts/LICENSE.Liberation`](fonts/LICENSE.Liberation).
 
 ### Software Protection Platform (SPP/SPPC)
 
-Wine365 implements the `sppc.dll` subset Office Click-to-Run uses for local
-Grace validation, including license status, policy, SLID, license-file, and
-authentication queries. It discovers the installed product instead of exposing
-a fixed SKU:
+Wine365 implements the `sppc.dll` subset Office uses for local Grace checks. It
+selects the first valid installed SKU from Click-to-Run's `ProductReleaseIds`
+and `Licenses16` XML/XRM metadata, with x64, x86, and multi-product support.
 
-- `ProductReleaseIds` is read from the Click-to-Run registry configuration;
-- the matching Grace Acid, UL-OOB license, PPD license, product identity, and
-  policies are read from Office's installed `Licenses16` XML/XRM metadata;
-- comma- or semicolon-separated multi-product installations select the first
-  product with a valid Grace mapping;
-- both `Program Files` and `Program Files (x86)` Office installations are
-  supported, and the immutable result is cached once per process.
-
-The metadata-driven path passed local probes for all 76 Grace profiles present
-in the tested Office metadata plus multi-product and fallback cases (80/80).
-Known Word 2024 and Microsoft 365 ProPlus profiles remain as compatibility
-fallbacks. Wine365 does not invent product-key SLIDs for other products and is
-not a general SPP store: volume activation and many other APIs remain stubs.
-SPPC supplies local Office responses; it does not grant a Microsoft 365
-subscription. See [`dlls/sppc/sppc.c`](dlls/sppc/sppc.c).
+This passed 80/80 probes across 76 metadata profiles and four fallback or
+multi-product cases. Word 2024 and Microsoft 365 ProPlus fallbacks remain;
+volume activation is still stubbed, and SPPC does not grant a subscription.
+See [`dlls/sppc/sppc.c`](dlls/sppc/sppc.c).
 
 ### Delivery Optimization
 
